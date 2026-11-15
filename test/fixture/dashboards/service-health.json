@@ -1,0 +1,29 @@
+{
+  "uid": "svc-health",
+  "title": "Service Health",
+  "tags": ["ops", "sla"],
+  "timezone": "utc",
+  "schemaVersion": 41,
+  "refresh": "1m",
+  "time": {"from": "now-6h", "to": "now"},
+  "description": "Provisioned from a file: request rate, latency and errors per service.",
+  "panels": [
+    {"id": 1, "type": "timeseries", "title": "Request rate",
+     "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+     "datasource": {"type": "prometheus", "uid": "prom-prod"},
+     "targets": [
+       {"refId": "A", "expr": "sum by (service) (rate(http_requests_total[5m]))", "legendFormat": "{{service}}"},
+       {"refId": "B", "expr": "sum(rate(http_requests_total{code=~\"5..\"}[5m]))", "hide": true}
+     ]},
+    {"id": 2, "type": "stat", "title": "Warehouse orders today",
+     "gridPos": {"x": 12, "y": 0, "w": 6, "h": 8},
+     "datasource": {"type": "grafana-postgresql-datasource", "uid": "pg-warehouse"},
+     "targets": [{"refId": "A", "format": "table", "rawQuery": true, "rawSql": "SELECT count(*) FROM orders WHERE created_at > now() - interval '1 day'"}]},
+    {"id": 3, "type": "row", "title": "Synthetic", "collapsed": false,
+     "gridPos": {"x": 0, "y": 8, "w": 24, "h": 1}, "panels": []},
+    {"id": 4, "type": "timeseries", "title": "Pulse",
+     "gridPos": {"x": 0, "y": 9, "w": 24, "h": 8},
+     "datasource": {"type": "grafana-testdata-datasource", "uid": "testdata"},
+     "targets": [{"refId": "A", "scenarioId": "predictable_pulse", "pulseWave": {"timeStep": 60, "onCount": 3, "offCount": 2, "onValue": 10, "offValue": 1}}]}
+  ]
+}

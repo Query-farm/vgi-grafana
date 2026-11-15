@@ -1,0 +1,35 @@
+# Data sources for the recording fixture. The secure fields are fake values:
+# the worker must never return them (Grafana's API does not either), and the
+# basic-auth URL user info must be masked in grafana.main.connections.
+apiVersion: 1
+datasources:
+  - name: TestData
+    uid: testdata
+    type: grafana-testdata-datasource
+    access: proxy
+    isDefault: true
+    editable: false
+  - name: Prometheus (prod)
+    uid: prom-prod
+    type: prometheus
+    access: proxy
+    url: http://scraper:hunter2@prometheus.internal.example:9090
+    basicAuth: true
+    basicAuthUser: grafana
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
+    secureJsonData:
+      basicAuthPassword: do-not-leak-basic-auth
+  - name: Warehouse
+    uid: pg-warehouse
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: warehouse.internal.example:5432
+    user: grafana_reader
+    jsonData:
+      database: analytics
+      sslmode: require
+      postgresVersion: 1500
+    secureJsonData:
+      password: do-not-leak-pg-password

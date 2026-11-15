@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: operations
+    orgId: 1
+    folder: Operations
+    folderUid: ops
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
