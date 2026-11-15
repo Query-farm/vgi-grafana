@@ -130,14 +130,13 @@ func withExamples(tags map[string]string, lists ...[]vgi.CatalogExample) map[str
 const catalogDocLLM = "Read Grafana (OSS, Enterprise or Grafana Cloud) from SQL through its HTTP API, read-only. Needs a DuckDB " +
 	"secret: CREATE SECRET (TYPE grafana, BASE_URL 'https://grafana.example.com', TOKEN '<service account token>') or USERNAME/PASSWORD " +
 	"for basic auth; optional ORG_ID (sent as X-Grafana-Org-Id) and PAGE_SIZE. ATTACH option secret_name picks a named secret for every " +
-	"table; table functions also take secret_name :=. Catalog tables (no parentheses): dashboards, folders, users, connections (data " +
-	"sources) in the shared BI shape (tool, id, title, folder_path, owner, created_at, updated_at, last_viewed_at, view_count, url) that " +
-	"`UNION ALL BY NAME` with vgi-looker / vgi-metabase / vgi-tableau; panels and panel_queries (every panel and query, flattened), " +
-	"dashboard_versions, library_panels; orgs, teams, team_members, service_accounts, health; alerting: alert_rules, alert_rule_queries, " +
-	"rule_groups, alert_rule_states, contact_points, notification_policies, mute_timings, alerts, silences, alert_state_transitions; and " +
-	"annotations. Table functions: search(query :=, tags :=, type :=, folder_uids :=, starred :=) and ds_query(datasource_uid, query_json, " +
-	"start_time, end_time), which runs any data source query through Grafana and returns long rows (labels `MAP`, ts, value); scalars duration_seconds and redact_url need no server. WHERE filters " +
-	"on uids, folders, tags, time and type are pushed into API parameters and re-checked exactly. Secrets never leave Grafana: data " +
+	"table; table functions also take secret_name :=. Reach for it to inventory and audit Grafana content (dashboards, panels and " +
+	"their queries flattened, folders with paths, data sources, version history), review access (users, teams, service accounts), " +
+	"inspect alerting configuration and live state, read annotations over a time window, or run any data source query through " +
+	"Grafana and get long rows (labels `MAP`, ts, value). Most objects are catalog tables read without parentheses. The content " +
+	"inventory uses the shared BI shape (tool, id, title, folder_path, owner, created_at, updated_at, last_viewed_at, view_count, url) " +
+	"that `UNION ALL BY NAME` with vgi-looker / vgi-metabase / vgi-tableau. WHERE filters on uids, folders, tags, time and type are " +
+	"pushed into API parameters and re-checked exactly. Results reflect the token's permissions. Secrets never leave Grafana: data " +
 	"source passwords, secure fields, URL credentials, contact point settings and service account tokens are not returned."
 
 // CatalogDocMD is the catalog's comment: one short paragraph for directories.
@@ -165,11 +164,19 @@ const schemaDocLLM = "The main schema mirrors one Grafana organization through i
 	"by an equality or IN filter on that key. Equality, IN, list_contains on tags and time ranges become API parameters; every " +
 	"filter is re-checked exactly in the worker. Every object is read-only and nothing stored as a secret in Grafana is returned."
 
-// SchemaDocMD is the main schema's human-facing description (also its comment).
+// SchemaComment is the main schema's one-line comment.
+const SchemaComment = "One Grafana organization as read-only SQL: content inventory, access, alerting, annotations and data source queries."
+
+// SchemaDocMD is the main schema's human-facing description.
 const SchemaDocMD = "## main\n\n" +
-	"One Grafana organization as SQL: content inventory, access, alerting, annotations and data source queries.\n\n" +
-	"Tables read the API on each query. Filters on keys, folders, tags and time are sent to Grafana so only what you ask " +
-	"for is fetched, and every filter is re-checked exactly.\n\n" +
+	"Everything is read from Grafana's HTTP API on each query, with the permissions of the `grafana` secret's service account " +
+	"token or login, in the organization the optional `ORG_ID` selects (sent as `X-Grafana-Org-Id`). Nothing is cached and nothing is " +
+	"written.\n\n" +
+	"Objects are keyed by UID: `dashboard_uid`, `rule_uid`, `datasource_uid` and `folder_uid` columns join to the owning " +
+	"table. Filters on keys, folders, tags and time are sent to Grafana so only what you ask for is fetched, and every filter " +
+	"is re-checked exactly. Tables that need one request per dashboard, rule or team fetch only the keys pinned by an equality " +
+	"or `IN` filter, so pin them when you can.\n\n" +
+	"`view_count` and `last_viewed_at` are NULL on Grafana OSS, and `folder_path` is `/` for the General folder. " +
 	"The BI inventory columns line up with the Looker, Tableau and Metabase workers for cross-tool reports."
 
 // agentTask is one public analyst task for `vgi-lint simulate`.
