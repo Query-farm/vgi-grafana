@@ -96,14 +96,11 @@ SELECT * FROM grafana.main.search(query := 'latency', secret_name := 'partner');
 
 With more than one `grafana` secret and no `secret_name`, DuckDB picks one of them, so name
 the secret explicitly. Credentials are read from the secret on every request and never enter
-table-function state, logs or error messages. With Grafana's default roles a **Viewer** service
-account can read dashboards, panels, versions, folders, search, annotations, rule groups and
-states, alerts and silences, and run `ds_query` on data sources it may query; data sources,
-users, teams, service accounts and the provisioning-API alerting tables (`alert_rules`,
-`alert_rule_queries`, `contact_points`, `notification_policies`, `mute_timings`) need
-**Admin** (or the matching RBAC read permissions), and listing every org needs a **server
-admin** (otherwise `orgs` returns the current org). These are Grafana's defaults, not
-verified against every RBAC setup.
+table-function state, logs or error messages. Measured against Grafana 12.1.1 with default roles,
+a **Viewer** service account token reads every table except `dashboard_versions` (needs
+Editor), `users`, `teams`, `team_members` and `service_accounts` (need org Admin), and gets
+only its current org from `orgs` (listing every org needs a server admin). Custom RBAC
+roles or other Grafana versions can differ.
 Requests that get 429, 502, 503 or 504 are retried with exponential backoff, honouring
 `Retry-After`; other errors carry the HTTP status and Grafana's message.
 
