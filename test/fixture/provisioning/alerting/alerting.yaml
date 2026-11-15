@@ -58,7 +58,7 @@ muteTimes:
 groups:
   - orgId: 1
     name: web-availability
-    folder: Operations
+    folder: Alerts
     interval: 10s
     rules:
       - uid: rule-high-latency
@@ -105,7 +105,7 @@ groups:
         annotations: {summary: 'error rate above 5%'}
   - orgId: 1
     name: db-capacity
-    folder: Operations
+    folder: Alerts
     interval: 1m
     rules:
       - uid: rule-disk-full

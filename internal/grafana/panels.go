@@ -218,7 +218,7 @@ var panelsDef = &tableDef{
 // PromQL/LogQL expr, SQL rawSql, InfluxQL/Flux query, Elasticsearch query,
 // a server-side expression, or a TestData scenario id.
 func queryText(t rec) any {
-	for _, k := range []string{"expr", "rawSql", "query", "expression", "rawQuery", "queryText", "target"} {
+	for _, k := range []string{"expr", "rawSql", "query", "expression", "rawQuery", "queryText", "target", "scenarioId"} {
 		if s, ok := t[k].(string); ok && s != "" {
 			return s
 		}

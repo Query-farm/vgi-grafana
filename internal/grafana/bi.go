@@ -266,7 +266,12 @@ var usersDef = &tableDef{
 		cStr("display_name", "Display name.", "name"),
 		cStr("email", "Email address.", "email"),
 		cStr("role", "Org role: Admin, Editor, Viewer or None.", "role"),
-		cTS("last_seen_at", "Last activity time.", "lastSeenAt"),
+		cFn("last_seen_at", tTS, "Last activity time; NULL when the user never signed in (Grafana reports those as 10 years ago).", func(r rec, _ *scan) any {
+			if strOrEmpty(r, "lastSeenAtAge") == "10 years" {
+				return nil
+			}
+			return ts(r, "lastSeenAt")
+		}),
 		cBool("is_disabled", "The account is disabled.", "isDisabled"),
 		cList("auth_labels", "External auth providers the user signed in with (e.g. 'OAuth', 'LDAP').", "authLabels"),
 		cBool("is_externally_synced", "Role managed by an external identity provider.", "isExternallySynced"),
@@ -405,12 +410,12 @@ var connectionsDef = &tableDef{
 // ---- search ----------------------------------------------------------------------
 
 type searchArgs struct {
-	Query        *string `vgi:"name=query,doc=Free-text title search (case-insensitive substring)."`
-	Tags         *string `vgi:"name=tags,doc=Comma-separated tags; a dashboard must carry all of them."`
-	Type         *string `vgi:"name=type,choices='dashboard,folder',doc=Restrict to 'dashboard' or 'folder' hits."`
-	FolderUIDs   *string `vgi:"name=folder_uids,doc=Comma-separated folder UIDs to search in."`
-	Starred      *bool   `vgi:"name=starred,doc=Only items starred by the credential's user."`
-	SecretName   *string `vgi:"name=secret_name,doc=Name of the grafana secret to use when several exist (default: the ATTACH secret_name option or the default secret)."`
+	Query      *string `vgi:"name=query,doc=Free-text title search (case-insensitive substring)."`
+	Tags       *string `vgi:"name=tags,doc=Comma-separated tags; a dashboard must carry all of them."`
+	Type       *string `vgi:"name=type,choices='dashboard,folder',doc=Restrict to 'dashboard' or 'folder' hits."`
+	FolderUIDs *string `vgi:"name=folder_uids,doc=Comma-separated folder UIDs to search in."`
+	Starred    *bool   `vgi:"name=starred,doc=Only items starred by the credential's user."`
+	SecretName *string `vgi:"name=secret_name,doc=Name of the grafana secret to use when several exist (default: the ATTACH secret_name option or the default secret)."`
 }
 
 func (a *searchArgs) secret() string { return deref(a.SecretName) }

@@ -96,8 +96,8 @@ var teamsDef = &tableDef{
 		Category:    "access",
 		Keywords:    "teams, groups, members, access",
 		Description: "Teams of the current organization with their member counts",
-		DocLLM: "One row per team (GET /api/teams/search, paged). team_id joins team_members.team_id. Pushdown: name = 'x' -> name.",
-		DocMD:  "## teams\n\nTeams with member counts.",
+		DocLLM:      "One row per team (GET /api/teams/search, paged). team_id joins team_members.team_id. Pushdown: name = 'x' -> name.",
+		DocMD:       "## teams\n\nTeams with member counts.",
 		Examples: []vgi.CatalogExample{
 			{SQL: "SELECT name, member_count FROM grafana.main.teams ORDER BY member_count DESC, name", Description: "Largest teams"},
 		},
@@ -307,4 +307,3 @@ var healthDef = &tableDef{
 		return s.Def.rows([]rec{h}, s), nil
 	},
 }
-

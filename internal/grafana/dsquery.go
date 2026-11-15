@@ -7,6 +7,7 @@ package grafana
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -154,8 +155,13 @@ var dsQueryDef = &tableDef{
 			} `json:"results"`
 		}
 		s.St.Done = true
-		if err := s.C.post(ctx, "/api/ds/query", body, &resp); err != nil {
-			return nil, err
+		httpErr := s.C.post(ctx, "/api/ds/query", body, &resp)
+		if httpErr != nil {
+			// A failed query comes back as 4xx/5xx with the per-refId errors.
+			var ae *apiError
+			if !errors.As(httpErr, &ae) || json.Unmarshal(ae.Body, &resp) != nil || len(resp.Results) == 0 {
+				return nil, httpErr
+			}
 		}
 		refs := make([]string, 0, len(resp.Results))
 		for k := range resp.Results {
@@ -177,6 +183,9 @@ var dsQueryDef = &tableDef{
 					recs = append(recs, rec{"_lr": &rows[j]})
 				}
 			}
+		}
+		if httpErr != nil {
+			return nil, httpErr
 		}
 		return s.Def.rows(recs, s), nil
 	},

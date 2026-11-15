@@ -58,7 +58,6 @@ func nilIfEmpty(s string) any {
 	return s
 }
 
-
 // buildBatch writes rows (full-width, in full's order) into a batch with the
 // out schema, which may be a projection of full.
 func buildBatch(out, full *arrow.Schema, rows [][]any) (arrow.RecordBatch, error) {

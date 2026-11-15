@@ -61,6 +61,10 @@ func strOrEmpty(r rec, keys ...string) string {
 // i64 reads a numeric field as BIGINT.
 func i64(r rec, keys ...string) any {
 	switch x := path(r, keys...).(type) {
+	case int64:
+		return x
+	case int:
+		return int64(x)
 	case float64:
 		return int64(x)
 	case json.Number:

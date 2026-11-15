@@ -1,148 +1,670 @@
 # name: test/sql/grafana.test
-# description: SQL-level tests for the grafana worker, run through DuckDB by ci/run-integration.sh
+# description: SQL tests for the grafana worker against recorded Grafana responses (test/fixture_server)
 # group: [grafana]
-# managed-by: vgi-starters (edit upstream in shared/, then run tools/render.py)
 
 require vgi
 
 require-env GRAFANA_WORKER
 
-require-env GRAFANA_MOCK_API
+require-env GRAFANA_FIXTURE_URL
 
-require-env GRAFANA_MOCK_API_AUTH
+require-env GRAFANA_FIXTURE_AUTH_URL
 
 statement ok
 ATTACH 'grafana' (TYPE vgi, LOCATION '{GRAFANA_WORKER}');
 
-# ---------------------------------------------------------------- greet (scalar)
+# vgi-go 0.42.0 cannot decode a pushed TIMESTAMPTZ filter in a non-UTC
+# session (README "Known limitations"), so the suite pins UTC.
+statement ok
+INSTALL icu;
 
-query T
-SELECT grafana.main.greet('Ada');
-----
-Hi, Ada!
+statement ok
+LOAD icu;
 
-query T
-SELECT grafana.main.greet('Ada', 'formal');
-----
-Good day, Ada.
+statement ok
+LOAD json;
 
-# NULL in, NULL out.
-query T
-SELECT grafana.main.greet(NULL);
-----
-NULL
+statement ok
+SET TimeZone = 'UTC';
 
-# Works over a whole column, one result per row.
-query T
-SELECT grafana.main.greet(name) FROM (VALUES ('Ada'), ('Grace'), (NULL)) AS t(name) ORDER BY ALL NULLS LAST;
-----
-Hi, Ada!
-Hi, Grace!
-NULL
+# ------------------------------------------------------------------ secrets
 
-# `style` is constrained to 'casual' | 'formal' and checked when the query is bound.
-# (No expected message: each SDK words constraint errors its own way.)
+# Without a secret every table says how to create one.
 statement error
-SELECT grafana.main.greet('Ada', 'loud');
+SELECT * FROM grafana.main.health;
 ----
-<REGEX>:.*
+CREATE SECRET
 
-# ------------------------------------------------------ sequence_table (table fn)
+statement ok
+CREATE SECRET bad_url (TYPE grafana, BASE_URL 'http://admin:pw@127.0.0.1:1');
 
-query II
-SELECT n, squared FROM grafana.main.sequence_table(4) ORDER BY n;
-----
-0	0
-1	1
-2	4
-3	9
-
-# Named argument with a default.
-query I
-SELECT n FROM grafana.main.sequence_table(3, step := 5) ORDER BY n;
-----
-0
-5
-10
-
-# Larger than one batch: the cursor must carry across process calls.
-query II
-SELECT count(*), max(n) FROM grafana.main.sequence_table(25000);
-----
-25000	24999
-
-query I
-SELECT count(*) FROM grafana.main.sequence_table(0);
-----
-0
-
-# count is constrained to [0, 1000000].
 statement error
-SELECT * FROM grafana.main.sequence_table(-1);
+SELECT * FROM grafana.main.health;
 ----
-<REGEX>:.*
+must not contain credentials
 
-# Named arguments are constrained too: step >= 1.
-statement error
-SELECT * FROM grafana.main.sequence_table(3, step := 0);
+statement ok
+DROP SECRET bad_url;
+
+statement ok
+CREATE SECRET grafana_fixture (TYPE grafana, BASE_URL '{GRAFANA_FIXTURE_URL}', PAGE_SIZE '2');
+
+query TT
+SELECT version, database FROM grafana.main.health;
 ----
-<REGEX>:.*
+12.1.1	ok
 
-# ------------------------------------------------- fetch_items (REST table fn)
+# ------------------------------------------------------------------ dashboards (BI shape)
 
-query IIT
-SELECT count(*), sum(id), min(name) FROM grafana.main.fetch_items('{GRAFANA_MOCK_API}', page_size := 4);
+query TTTTTTI
+SELECT tool, id, title, folder_uid, folder_title, folder_path, panel_count FROM grafana.main.dashboards ORDER BY id;
 ----
-25	325	item-01
+grafana	revenue	EMEA Revenue	sales-emea	EMEA	/Sales/EMEA	1
+grafana	scratch	Scratchpad	NULL	General	/	0
+grafana	svc-health	Service Health	ops	Operations	/Operations	4
+grafana	web-overview	Web Overview	ops-web	Web	/Operations/Web	6
+
+query TTTT
+SELECT id, tags, is_starred, owner FROM grafana.main.dashboards ORDER BY id;
+----
+revenue	[finance, sales]	false	admin
+scratch	[]	false	admin
+svc-health	[ops, sla]	false	Anonymous
+web-overview	[ops, web]	true	admin
+
+query TTTTTT
+SELECT id, version, schema_version, refresh, time_from, provisioned FROM grafana.main.dashboards ORDER BY id;
+----
+revenue	1	41	NULL	NULL	false
+scratch	1	41	NULL	NULL	false
+svc-health	1	41	1m	now-6h	true
+web-overview	2	41	30s	now-24h	false
+
+query TT
+SELECT id, regexp_replace(url, '^http://[^/]+', '') FROM grafana.main.dashboards ORDER BY id;
+----
+revenue	/d/revenue/emea-revenue
+scratch	/d/scratch/scratchpad
+svc-health	/d/svc-health/service-health
+web-overview	/d/web-overview/web-overview
+
+# Views are not exposed by Grafana OSS: NULL, typed.
+query TT
+SELECT typeof(last_viewed_at), count(*) FILTER (WHERE last_viewed_at IS NULL AND view_count IS NULL) FROM grafana.main.dashboards GROUP BY ALL;
+----
+TIMESTAMP WITH TIME ZONE	4
+
+# Pushdown: tag -> tag=, folder_uid -> folderUIDs, id -> dashboardUIDs, starred.
+query T
+SELECT title FROM grafana.main.dashboards WHERE list_contains(tags, 'ops') ORDER BY title;
+----
+Service Health
+Web Overview
+
+query T
+SELECT title FROM grafana.main.dashboards WHERE folder_uid IN ('ops', 'sales-emea') ORDER BY title;
+----
+EMEA Revenue
+Service Health
+
+query T
+SELECT title FROM grafana.main.dashboards WHERE id = 'revenue';
+----
+EMEA Revenue
+
+query T
+SELECT title FROM grafana.main.dashboards WHERE is_starred;
+----
+Web Overview
+
+# Filters the API cannot express are evaluated exactly in the worker.
+query T
+SELECT title FROM grafana.main.dashboards WHERE title LIKE '%e%' AND folder_path <> '/' ORDER BY title;
+----
+EMEA Revenue
+Service Health
+Web Overview
+
+query T
+SELECT title FROM grafana.main.dashboards WHERE folder_uid IS NULL;
+----
+Scratchpad
+
+query T
+SELECT title FROM grafana.main.dashboards WHERE updated_at > TIMESTAMPTZ '2020-01-01 00:00:00+00' AND regexp_matches(title, '^(Web|EMEA)') ORDER BY title;
+----
+EMEA Revenue
+Web Overview
+
+# The shared BI shape unions with the other BI workers' tables.
+query TTI
+SELECT tool, typeof(updated_at), count(*) FROM (SELECT tool, id, title, folder_path, owner, created_at, updated_at, last_viewed_at, view_count, url FROM grafana.main.dashboards UNION ALL BY NAME SELECT tool, id, title, folder_path, NULL AS owner, created_at, NULL AS updated_at, NULL AS last_viewed_at, NULL AS view_count, url FROM grafana.main.folders) GROUP BY ALL ORDER BY ALL;
+----
+grafana	TIMESTAMP WITH TIME ZONE	9
+
+# ------------------------------------------------------------------ folders
+
+query TTTTI
+SELECT id, title, parent_uid, folder_path, depth FROM grafana.main.folders ORDER BY folder_path, id;
+----
+ag4doayx5b9xcf	Alerts	NULL	/Alerts	1
+ops	Operations	NULL	/Operations	1
+ops-web	Web	ops	/Operations/Web	2
+sales	Sales	NULL	/Sales	1
+sales-emea	EMEA	sales	/Sales/EMEA	2
+
+query TTT
+SELECT id, owner, version FROM grafana.main.folders WHERE depth = 2 ORDER BY id;
+----
+ops-web	admin	1
+sales-emea	admin	1
 
 query TI
-SELECT category, count(*) FROM grafana.main.fetch_items('{GRAFANA_MOCK_API}') GROUP BY category ORDER BY category;
+SELECT f.folder_path, count(d.id) FROM grafana.main.folders f LEFT JOIN grafana.main.dashboards d ON d.folder_uid = f.id GROUP BY f.folder_path ORDER BY f.folder_path;
 ----
-hardware	8
-service	8
-software	9
+/Alerts	0
+/Operations	1
+/Operations/Web	1
+/Sales	0
+/Sales/EMEA	1
 
-# The harness runs GRAFANA_MOCK_API with MOCK_API_FLAKY=1: every page answers
-# 429 + Retry-After once, so every query above also exercised the retry path.
+# ------------------------------------------------------------------ search
 
-# GRAFANA_MOCK_API_AUTH requires a bearer token ('test-token'). Every language's
-# fetch_items must put the HTTP status code in its error message.
+query TTTT
+SELECT kind, uid, title, folder_path FROM grafana.main.search(query := 'e') ORDER BY kind, uid;
+----
+dashboard	revenue	EMEA Revenue	/Sales/EMEA
+dashboard	svc-health	Service Health	/Operations
+dashboard	web-overview	Web Overview	/Operations/Web
+folder	ag4doayx5b9xcf	Alerts	/
+folder	ops	Operations	/
+folder	ops-web	Web	/Operations
+folder	sales	Sales	/
+folder	sales-emea	EMEA	/Sales
+
+query T
+SELECT uid FROM grafana.main.search(type := 'dashboard', tags := 'ops,web') ORDER BY uid;
+----
+web-overview
+
+query T
+SELECT uid FROM grafana.main.search(starred := true);
+----
+web-overview
+
+query T
+SELECT uid FROM grafana.main.search(folder_uids := 'ops') ORDER BY uid;
+----
+ops-web
+svc-health
+
+query T
+SELECT uid FROM grafana.main.search() WHERE kind = 'folder' AND folder_uid = 'sales' ORDER BY uid;
+----
+sales-emea
+
 statement error
-SELECT count(*) FROM grafana.main.fetch_items('{GRAFANA_MOCK_API_AUTH}');
+SELECT * FROM grafana.main.search(type := 'panel');
 ----
-401
+<REGEX>:.*(dashboard|folder|choices|one of).*
 
-statement ok
-CREATE SECRET grafana_api_test (TYPE grafana_api, TOKEN 'test-token');
+# ------------------------------------------------------------------ panels and queries
+
+query TITTTTTI
+SELECT dashboard_uid, panel_id, title, type, datasource_uid, row_title, library_panel_uid, target_count FROM grafana.main.panels WHERE dashboard_uid = 'web-overview' ORDER BY panel_id;
+----
+web-overview	1	Latency (testdata)	timeseries	testdata	NULL	NULL	1
+web-overview	2	Slow pages	table	pg-warehouse	NULL	NULL	1
+web-overview	3	Details	row	NULL	NULL	NULL	0
+web-overview	4	Requests by status	timeseries	prom-prod	Details	NULL	1
+web-overview	5	NULL	NULL	NULL	NULL	lib-latency	0
+web-overview	6	Notes	text	NULL	NULL	NULL	0
+
+query TI
+SELECT type, count(*) FROM grafana.main.panels WHERE type <> 'row' GROUP BY type ORDER BY type;
+----
+barchart	1
+stat	1
+table	1
+text	1
+timeseries	4
+
+query TIIII
+SELECT dashboard_uid, grid_x, grid_y, grid_w, grid_h FROM grafana.main.panels WHERE dashboard_uid = 'svc-health' AND panel_id = 2;
+----
+svc-health	12	0	6	8
+
+query TT
+SELECT folder_path, regexp_replace(url, '^http://[^/]+', '') FROM grafana.main.panels WHERE dashboard_uid = 'revenue';
+----
+/Sales/EMEA	/d/revenue/emea-revenue?viewPanel=1
+
+# A missing dashboard is skipped, not an error.
+query I
+SELECT count(*) FROM grafana.main.panels WHERE dashboard_uid IN ('svc-health', 'no-such-dashboard');
+----
+4
+
+query TTTTTT
+SELECT dashboard_uid, panel_title, ref_id, datasource_uid, datasource_type, query_text FROM grafana.main.panel_queries ORDER BY dashboard_uid, panel_id, ref_id;
+----
+revenue	Revenue by country	A	pg-warehouse	grafana-postgresql-datasource	SELECT country, sum(amount) FROM orders GROUP BY country
+revenue	Revenue by country	B	testdata	grafana-testdata-datasource	csv_content
+svc-health	Request rate	A	prom-prod	prometheus	sum by (service) (rate(http_requests_total[5m]))
+svc-health	Request rate	B	prom-prod	prometheus	sum(rate(http_requests_total{code=~"5.."}[5m]))
+svc-health	Warehouse orders today	A	pg-warehouse	grafana-postgresql-datasource	SELECT count(*) FROM orders WHERE created_at > now() - interval '1 day'
+svc-health	Pulse	A	testdata	grafana-testdata-datasource	predictable_pulse
+web-overview	Latency (testdata)	A	testdata	grafana-testdata-datasource	csv_metric_values
+web-overview	Slow pages	A	pg-warehouse	grafana-postgresql-datasource	SELECT page, p95_ms FROM page_latency ORDER BY p95_ms DESC LIMIT 10
+web-overview	Requests by status	A	prom-prod	prometheus	sum by (code) (rate(http_requests_total{job="web"}[5m]))
+
+query TTT
+SELECT panel_title, ref_id, hidden FROM grafana.main.panel_queries WHERE dashboard_uid = 'svc-health' AND expr IS NOT NULL ORDER BY ref_id;
+----
+Request rate	A	false
+Request rate	B	true
+
+query TT
+SELECT ref_id, raw_sql FROM grafana.main.panel_queries WHERE dashboard_uid = 'revenue' ORDER BY ref_id;
+----
+A	SELECT country, sum(amount) FROM orders GROUP BY country
+B	NULL
+
+query T
+SELECT target_json->>'legendFormat' FROM grafana.main.panel_queries WHERE dashboard_uid = 'svc-health' AND ref_id = 'A' AND panel_id = 1;
+----
+{{service}}
+
+# Data source usage across dashboards.
+query TII
+SELECT c.title, count(DISTINCT q.dashboard_uid), count(q.ref_id) FROM grafana.main.connections c LEFT JOIN grafana.main.panel_queries q ON q.datasource_uid = c.id GROUP BY c.title ORDER BY c.title;
+----
+Prometheus (prod)	2	3
+TestData	3	3
+Warehouse	3	3
+
+# ------------------------------------------------------------------ versions and library panels
+
+query TIIITT
+SELECT dashboard_uid, version, parent_version, restored_from, created_by, message FROM grafana.main.dashboard_versions ORDER BY dashboard_uid, version;
+----
+revenue	1	0	0	admin	Initial save
+scratch	1	0	0	admin	Initial save
+svc-health	1	0	0	Anonymous	Initial save
+web-overview	1	0	0	admin	Initial save
+web-overview	2	1	0	admin	add details row and library panel
+
+query IT
+SELECT version, message FROM grafana.main.dashboard_versions WHERE dashboard_uid = 'web-overview' ORDER BY version;
+----
+1	Initial save
+2	add details row and library panel
+
+query TTTTTII
+SELECT uid, name, type, folder_uid, folder_path, version, connected_dashboards FROM grafana.main.library_panels;
+----
+lib-latency	Shared latency	timeseries	ops	/Operations	1	1
+
+query TT
+SELECT l.name, p.dashboard_uid FROM grafana.main.library_panels l JOIN grafana.main.panels p ON p.library_panel_uid = l.uid;
+----
+Shared latency	web-overview
+
+# ------------------------------------------------------------------ connections: no secret leaves
+
+query TTTTTTTTT
+SELECT id, title, type, access, endpoint, database, "user", basic_auth, is_default FROM grafana.main.connections ORDER BY id;
+----
+pg-warehouse	Warehouse	grafana-postgresql-datasource	proxy	warehouse.internal.example:5432	analytics	grafana_reader	false	false
+prom-prod	Prometheus (prod)	prometheus	proxy	http://prometheus.internal.example:9090	NULL	NULL	true	false
+testdata	TestData	grafana-testdata-datasource	proxy	NULL	NULL	NULL	false	true
+
+query T
+SELECT json_data::VARCHAR FROM grafana.main.connections WHERE id = 'prom-prod';
+----
+{"httpMethod":"POST","timeInterval":"15s"}
 
 query I
-SELECT count(*) FROM grafana.main.fetch_items('{GRAFANA_MOCK_API_AUTH}', page_size := 25);
+SELECT count(*) FROM grafana.main.connections WHERE concat_ws(' ', endpoint, json_data::VARCHAR, "user") LIKE '%hunter2%' OR concat_ws(' ', endpoint, json_data::VARCHAR) LIKE '%leak%';
 ----
-25
+0
 
-# Several pages: the token must survive between batches (over HTTP each batch is a
-# separate request, so a token kept only in memory is lost after page 1).
-query I
-SELECT count(*) FROM grafana.main.fetch_items('{GRAFANA_MOCK_API_AUTH}', page_size := 7);
+# ------------------------------------------------------------------ users, teams, orgs, service accounts
+
+query TTTTTT
+SELECT id, login, display_name, email, role, is_disabled FROM grafana.main.users ORDER BY user_id;
 ----
-25
+1	admin	NULL	admin@localhost	Admin	false
+2	alice	Alice Analyst	alice@example.com	Editor	false
+3	bob	Bob Builder	bob@example.com	Viewer	false
+
+query TT
+SELECT login, last_seen_at IS NULL FROM grafana.main.users ORDER BY user_id;
+----
+admin	false
+alice	true
+bob	true
+
+query T
+SELECT login FROM grafana.main.users WHERE login = 'bob';
+----
+bob
+
+query ITTI
+SELECT team_id, name, email, member_count FROM grafana.main.teams ORDER BY team_id;
+----
+1	SRE	sre@example.com	3
+2	Analysts	NULL	1
+
+query TTTT
+SELECT team_name, login, permission, is_admin FROM grafana.main.team_members ORDER BY team_name, login;
+----
+Analysts	admin	4	true
+SRE	admin	4	true
+SRE	alice	0	false
+SRE	bob	0	false
+
+query TT
+SELECT team_name, login FROM grafana.main.team_members WHERE team_id = 2;
+----
+Analysts	admin
+
+# Users outside the Analysts team.
+query T
+SELECT u.login FROM grafana.main.users u ANTI JOIN grafana.main.team_members m ON m.user_id = u.user_id AND m.team_name = 'Analysts' ORDER BY u.login;
+----
+alice
+bob
+
+query ITT
+SELECT org_id, name, is_current FROM grafana.main.orgs ORDER BY org_id;
+----
+1	Main Org.	false
+2	Partner Org	false
+
+query TTTTI
+SELECT name, login, role, is_disabled, token_count FROM grafana.main.service_accounts;
+----
+vgi-reader	sa-1-vgi-reader	Viewer	false	1
+
+# ------------------------------------------------------------------ alerting
+
+query TTTTTTRTTT
+SELECT uid, title, folder_path, rule_group, condition, no_data_state, for_seconds, is_paused, labels['severity'], datasource_uids FROM grafana.main.alert_rules ORDER BY uid;
+----
+rule-disk-full	Disk almost full	/Alerts	db-capacity	B	NoData	0.0	true	critical	[testdata]
+rule-error-rate	Error rate	/Alerts	web-availability	C	OK	300.0	false	warning	[testdata]
+rule-high-latency	High latency	/Alerts	web-availability	C	NoData	0.0	false	critical	[testdata]
+
+query T
+SELECT title FROM grafana.main.alert_rules WHERE annotations['runbook_url'] IS NULL ORDER BY title;
+----
+Disk almost full
+Error rate
+
+query TTTTTTR
+SELECT rule_title, ref_id, datasource_uid, is_expression, expression_type, is_condition, relative_from_seconds FROM grafana.main.alert_rule_queries ORDER BY rule_title, ref_id;
+----
+Disk almost full	A	testdata	false	NULL	false	600.0
+Disk almost full	B	__expr__	true	math	true	0.0
+Error rate	A	testdata	false	NULL	false	300.0
+Error rate	B	__expr__	true	reduce	false	0.0
+Error rate	C	__expr__	true	threshold	true	0.0
+High latency	A	testdata	false	NULL	false	600.0
+High latency	B	__expr__	true	reduce	false	0.0
+High latency	C	__expr__	true	threshold	true	0.0
+
+query TT
+SELECT rule_title, query_text FROM grafana.main.alert_rule_queries WHERE is_condition ORDER BY rule_title;
+----
+Disk almost full	$A > 90
+Error rate	B
+High latency	B
+
+query TTRI
+SELECT name, folder_path, interval_seconds, rule_count FROM grafana.main.rule_groups ORDER BY name;
+----
+db-capacity	/Alerts	60.0	1
+web-availability	/Alerts	10.0	2
+
+query TTTTI
+SELECT rule_uid, rule_name, state, health, instance_count FROM grafana.main.alert_rule_states ORDER BY rule_uid;
+----
+rule-disk-full	Disk almost full	inactive	ok	0
+rule-error-rate	Error rate	inactive	ok	1
+rule-high-latency	High latency	firing	ok	1
+
+query TTTTITT
+SELECT uid, name, type, target_host, address_count, setting_keys, disable_resolve_message FROM grafana.main.contact_points ORDER BY name;
+----
+NULL	email receiver	email	NULL	1	[addresses]	false
+cp-email	ops-email	email	NULL	2	[addresses, singleEmail]	true
+cp-webhook	ops-webhook	webhook	hooks.example.com	NULL	[httpMethod, password, url]	false
+
+# Webhook paths and tokens are withheld.
+query I
+SELECT count(*) FROM grafana.main.contact_points WHERE target_host LIKE '%token%' OR target_host LIKE '%/%';
+----
+0
+
+query TTITTTRRRT
+SELECT path, parent_path, depth, is_default, receiver, matchers, group_wait_seconds, group_interval_seconds, repeat_interval_seconds, continue_matching FROM grafana.main.notification_policies ORDER BY path;
+----
+0	NULL	0	true	ops-email	[]	30.0	300.0	14400.0	false
+0.0	0	1	false	ops-webhook	[{'name': severity, 'op': '=', 'value': critical}]	10.0	300.0	14400.0	true
+0.0.0	0.0	2	false	ops-email	[{'name': team, 'op': '=~', 'value': web|db}]	10.0	300.0	14400.0	false
+0.1	0	1	false	ops-email	[{'name': severity, 'op': '!=', 'value': critical}]	30.0	300.0	43200.0	false
+
+query TT
+SELECT path, mute_timings FROM grafana.main.notification_policies WHERE len(mute_timings) > 0;
+----
+0.0.0	[weekends]
+
+query TITT
+SELECT name, interval_count, weekdays, provenance FROM grafana.main.mute_timings ORDER BY name;
+----
+maintenance-window	1	[tuesday]	file
+weekends	1	[saturday, sunday]	file
+
+query TTTTT
+SELECT alertname, rule_uid, state, labels['team'], receivers FROM grafana.main.alerts ORDER BY alertname;
+----
+High latency	rule-high-latency	active	web	[ops-email]
+
+query TTTT
+SELECT state, created_by, comment, matchers FROM grafana.main.silences;
+----
+active	alice	db maintenance window	[{'name': team, 'value': db, 'is_regex': false, 'is_equal': true}, {'name': alertname, 'value': Disk.*, 'is_regex': true, 'is_equal': true}]
+
+query TTT
+SELECT rule_uid, previous_state, current_state FROM grafana.main.alert_state_history WHERE rule_uid = 'rule-high-latency' ORDER BY time LIMIT 1;
+----
+rule-high-latency	Normal	Alerting
+
+query TI
+SELECT rule_uid, count(*) FROM grafana.main.alert_state_history GROUP BY rule_uid ORDER BY rule_uid;
+----
+rule-high-latency	1
+
+# ------------------------------------------------------------------ annotations
+
+query ITTTTTTT
+SELECT id, type, time, time_end, is_region, text, tags, dashboard_uid FROM grafana.main.annotations WHERE type = 'annotation' ORDER BY id;
+----
+1	annotation	2026-01-01 00:00:00+00	2026-01-01 00:00:00+00	false	Deploy web v1.2.3	[deploy, web]	web-overview
+2	annotation	2026-01-01 02:00:00+00	2026-01-01 02:00:00+00	false	Deploy web v1.2.4	[deploy, web]	web-overview
+3	annotation	2026-01-01 03:00:00+00	2026-01-01 04:00:00+00	true	Incident: elevated 5xx	[incident, web]	web-overview
+4	annotation	2026-01-01 01:00:00+00	2026-01-01 03:00:00+00	true	Database maintenance	[maintenance, db]	NULL
+5	annotation	2026-01-01 05:00:00+00	2026-01-01 05:00:00+00	false	Office party	[social]	NULL
+6	annotation	2026-01-01 05:00:00+00	2026-01-01 05:00:00+00	false	Price change	[finance]	revenue
+
+# Time window pushdown (and window splitting at PAGE_SIZE 2).
+query IT
+SELECT id, text FROM grafana.main.annotations WHERE time >= TIMESTAMPTZ '2026-01-01 01:00:00+00' AND time < TIMESTAMPTZ '2026-01-01 04:00:00+00' ORDER BY time, id;
+----
+4	Database maintenance
+2	Deploy web v1.2.4
+3	Incident: elevated 5xx
+
+query IT
+SELECT id, text FROM grafana.main.annotations WHERE time BETWEEN TIMESTAMPTZ '2026-01-01 02:00:00+00' AND TIMESTAMPTZ '2026-01-01 02:00:00+00';
+----
+2	Deploy web v1.2.4
+
+query IT
+SELECT id, text FROM grafana.main.annotations WHERE list_contains(tags, 'deploy') ORDER BY id;
+----
+1	Deploy web v1.2.3
+2	Deploy web v1.2.4
+
+query II
+SELECT id, panel_id FROM grafana.main.annotations WHERE dashboard_uid = 'web-overview' AND panel_id = 4;
+----
+3	4
+
+query TT
+SELECT type, new_state FROM grafana.main.annotations WHERE type = 'alert';
+----
+alert	Alerting
+
+query I
+SELECT count(*) FROM grafana.main.annotations WHERE time > TIMESTAMPTZ '2099-01-01 00:00:00+00';
+----
+0
+
+# ------------------------------------------------------------------ ds_query
+
+query TTTRT
+SELECT ref_id, field, ts, value, string_value FROM grafana.main.ds_query('testdata', '{"scenarioId": "csv_metric_values", "stringInput": "1,20,90", "alias": "cpu"}', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-01 01:00:00+00') ORDER BY ts;
+----
+A	cpu	2026-01-01 00:00:00+00	1.0	NULL
+A	cpu	2026-01-01 00:30:00+00	20.0	NULL
+A	cpu	2026-01-01 01:00:00+00	90.0	NULL
+
+# Several queries in one call; a table frame has no ts.
+query TTIRT
+SELECT ref_id, field, row_index, value, string_value FROM grafana.main.ds_query('testdata', '[{"scenarioId": "csv_metric_values", "stringInput": "5"}, {"refId": "T", "scenarioId": "csv_content", "csvContent": "name,value,ok\nx,1.5,true\ny,,false"}]', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-01 01:00:00+00') WHERE ts IS NULL ORDER BY ref_id, field, row_index;
+----
+T	name	0	NULL	x
+T	name	1	NULL	y
+T	ok	0	1.0	true
+T	ok	1	0.0	false
+T	value	0	1.5	NULL
+T	value	1	NULL	NULL
+
+# Labelled series: labels MAP, one row per series and point.
+query TII
+SELECT labels['env'], count(DISTINCT field), count(*) FROM grafana.main.ds_query('testdata', '{"scenarioId": "random_walk", "seriesCount": 2, "labels": "env=prod", "seed": 7}', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-01 01:00:00+00', max_data_points := 6, interval_ms := 600000) GROUP BY ALL;
+----
+prod	2	12
+
+query I
+SELECT count(*) FROM grafana.main.ds_query('testdata', '{"scenarioId": "predictable_pulse", "pulseWave": {"timeStep": 600, "onCount": 1, "offCount": 1, "onValue": 10, "offValue": 1}}', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-01 01:00:00+00', interval_ms := 600000) WHERE value = 10;
+----
+3
+
+statement error
+SELECT * FROM grafana.main.ds_query('testdata', 'not json', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-01 01:00:00+00');
+----
+query_json must be a JSON object
+
+statement error
+SELECT * FROM grafana.main.ds_query('testdata', '{}', TIMESTAMPTZ '2026-01-01 01:00:00+00', TIMESTAMPTZ '2026-01-01 00:00:00+00');
+----
+end_time is before start_time
+
+# A data source error names the refId (handwritten.json).
+statement error
+SELECT * FROM grafana.main.ds_query('broken', '{"expr": "up"}', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-01 01:00:00+00');
+----
+query A on data source broken failed: connection refused
+
+# NaN / +Inf / -Inf entities and extra nanoseconds (handwritten.json).
+query TT
+SELECT ts::VARCHAR, value::VARCHAR FROM grafana.main.ds_query('entities', '{"expr": "x"}', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-01 01:00:00+00') ORDER BY row_index;
+----
+2026-01-01 00:00:00+00	1.5
+2026-01-01 00:00:01.000002+00	nan
+2026-01-01 00:00:02+00	inf
+2026-01-01 00:00:03+00	-inf
+2026-01-01 00:00:04+00	NULL
+
+# ------------------------------------------------------------------ auth, org header, named secrets
+
+# The auth fixture demands a credential and X-Grafana-Org-Id: 1.
+statement ok
+CREATE SECRET no_org (TYPE grafana, BASE_URL '{GRAFANA_FIXTURE_AUTH_URL}', TOKEN 'test-token');
+
+statement error
+SELECT * FROM grafana.main.search(secret_name := 'no_org');
+----
+HTTP 403
 
 statement ok
-DROP SECRET grafana_api_test;
-
-# base_url must be http(s).
-statement error
-SELECT * FROM grafana.main.fetch_items('ftp://example.com');
-----
-<REGEX>:.*
-
-# page_size is a named argument constrained to [1, 1000].
-statement error
-SELECT * FROM grafana.main.fetch_items('{GRAFANA_MOCK_API}', page_size := 0);
-----
-<REGEX>:.*
+CREATE SECRET bad_token (TYPE grafana, BASE_URL '{GRAFANA_FIXTURE_AUTH_URL}', TOKEN 'wrong', ORG_ID '1');
 
 statement error
-SELECT * FROM grafana.main.fetch_items('{GRAFANA_MOCK_API}', page_size := 5000);
+SELECT * FROM grafana.main.search(secret_name := 'bad_token');
 ----
-<REGEX>:.*
+HTTP 401
+
+statement ok
+CREATE SECRET tok (TYPE grafana, BASE_URL '{GRAFANA_FIXTURE_AUTH_URL}', TOKEN 'test-token', ORG_ID '1', PAGE_SIZE '2');
+
+query T
+SELECT uid FROM grafana.main.search(type := 'folder', secret_name := 'tok') ORDER BY uid;
+----
+ag4doayx5b9xcf
+ops
+ops-web
+sales
+sales-emea
+
+statement ok
+CREATE SECRET basic (TYPE grafana, BASE_URL '{GRAFANA_FIXTURE_AUTH_URL}', USERNAME 'viewer', PASSWORD 'secret-pw', ORG_ID '1', PAGE_SIZE '2');
+
+query I
+SELECT count(*) FROM grafana.main.ds_query('testdata', '{"scenarioId": "csv_metric_values", "stringInput": "1,20,90", "alias": "cpu"}', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-01 01:00:00+00', secret_name := 'basic');
+----
+3
+
+statement error
+SELECT * FROM grafana.main.search(secret_name := 'missing');
+----
+no grafana secret named "missing"
+
+# The ATTACH option secret_name points every catalog table at a named secret.
+statement ok
+ATTACH 'grafana' AS g2 (TYPE vgi, LOCATION '{GRAFANA_WORKER}', secret_name 'basic');
+
+query TI
+SELECT folder_path, count(*) FROM g2.main.dashboards GROUP BY folder_path ORDER BY folder_path;
+----
+/	1
+/Operations	1
+/Operations/Web	1
+/Sales/EMEA	1
+
+query T
+SELECT version FROM g2.main.health;
+----
+12.1.1
+
+# A credential that cannot list every org falls back to its current org
+# (handwritten.json answers /api/orgs with 403 at PAGE_SIZE 7).
+statement ok
+CREATE SECRET org_viewer (TYPE grafana, BASE_URL '{GRAFANA_FIXTURE_URL}', PAGE_SIZE '7');
+
+statement ok
+ATTACH 'grafana' AS g3 (TYPE vgi, LOCATION '{GRAFANA_WORKER}', secret_name 'org_viewer');
+
+query ITT
+SELECT org_id, name, is_current FROM g3.main.orgs;
+----
+1	Main Org.	true
+
+statement ok
+DETACH g2;
+
+statement ok
+DETACH g3;

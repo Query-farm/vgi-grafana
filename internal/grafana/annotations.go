@@ -3,9 +3,9 @@
 // GET /api/annotations has a limit but no offset, and its sort order mixes
 // start and end times, so a cursor on "the oldest time seen" can skip rows.
 // Instead the scan partitions the requested start-time range into windows:
-// a window that returns a full page is split in half and both halves are
-// queued, so every annotation is read from exactly one window whose page was
-// not truncated. The window stack lives in ScanState.Keys, so the scan
+// a window that returns a full page is split at the oldest start on that
+// page and both parts are queued, so every annotation is read
+// from exactly one window whose page was not truncated. The window stack lives in ScanState.Keys, so the scan
 // resumes over HTTP.
 
 package grafana
@@ -62,8 +62,8 @@ var annotationsDef = &tableDef{
 			"new_state / alert_name). dashboard_uid / panel_id are NULL for org-wide annotations. Pushdown: time >= / > / < / <= / = / " +
 			"BETWEEN -> from/to window on the start time; dashboard_uid = 'x' -> dashboardUID; panel_id = n -> panelId; type = 'alert' | " +
 			"'annotation' -> type; list_contains(tags, 'x') -> tags (several must all match). Without a time filter every annotation is " +
-			"read. The API has no offset, so a window that returns a full page (the secret's PAGE_SIZE, default 1000) is split in half " +
-			"and re-read until no page is truncated (a single millisecond is re-read with a larger limit).",
+			"read. The API has no offset, so a window that returns a full page (the secret's PAGE_SIZE, default 1000) is split at the oldest start on that page " +
+			"and re-read until no page is truncated (a window crowded by overlapping regions is re-read with a larger limit).",
 		DocMD: "## annotations\n\nDeploys, incidents and alert events as rows, with the time window pushed to Grafana.",
 		Examples: []vgi.CatalogExample{
 			{SQL: "SELECT time, text, tags FROM grafana.main.annotations WHERE list_contains(tags, 'deploy') AND time >= TIMESTAMPTZ '2026-01-01 00:00:00+00' ORDER BY time",
@@ -167,18 +167,34 @@ var annotationsDef = &tableDef{
 			return nil, err
 		}
 		if len(list) >= limit {
-			if hi <= lo {
-				// One millisecond: regions overlapping it fill the page too,
-				// so retry it with a larger limit instead of splitting.
+			// Truncated page. Regions that start before the window but
+			// overlap it take page slots too: when they fill most of the
+			// page, re-read the window with a larger limit; otherwise split
+			// it at the oldest start on the page (the page holds roughly the
+			// newest annotations).
+			// The older part goes on top of the stack and is read first.
+			inWindow, oldest := 0, hi+1
+			for _, a := range list {
+				if t, ok := a["time"].(float64); ok && int64(t) >= lo && int64(t) <= hi {
+					inWindow++
+					oldest = min(oldest, int64(t))
+				}
+			}
+			if inWindow*2 < len(list) || hi <= lo {
 				if limit >= maxAnnotationLimit {
-					return nil, fmt.Errorf("grafana /api/annotations: more than %d annotations overlap %s",
-						limit, time.UnixMilli(lo).UTC().Format(time.RFC3339Nano))
+					return nil, fmt.Errorf("grafana /api/annotations: more than %d annotations overlap %s .. %s",
+						limit, time.UnixMilli(lo).UTC().Format(time.RFC3339Nano), time.UnixMilli(hi).UTC().Format(time.RFC3339Nano))
 				}
 				s.St.Keys = append(s.St.Keys, window(lo, hi, min(limit*4, maxAnnotationLimit)))
 				return nil, nil
 			}
-			mid := lo + (hi-lo)/2
-			// The older half goes on top of the stack, so it is read first.
+			mid := oldest - 1
+			if oldest == lo {
+				// The oldest start is the window's first millisecond: read
+				// that millisecond on its own (with a larger limit if it is
+				// full) and the rest separately.
+				mid = lo
+			}
 			s.St.Keys = append(s.St.Keys, window(mid+1, hi, 0), window(lo, mid, 0))
 			return nil, nil
 		}

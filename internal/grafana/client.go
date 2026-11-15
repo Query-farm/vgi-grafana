@@ -172,6 +172,8 @@ type apiError struct {
 	Status  int
 	Message string
 	Path    string
+	// Body is the raw response (never part of the message).
+	Body []byte
 }
 
 func (e *apiError) Error() string {
@@ -293,7 +295,7 @@ func (c *conn) do(ctx context.Context, method, path string, params url.Values, b
 			return fmt.Errorf("grafana %s: reading response: %w", path, readErr)
 		}
 		if resp.StatusCode/100 != 2 {
-			return &apiError{Status: resp.StatusCode, Path: path, Message: errorMessage(data)}
+			return &apiError{Status: resp.StatusCode, Path: path, Message: errorMessage(data), Body: data}
 		}
 		if out == nil {
 			return nil

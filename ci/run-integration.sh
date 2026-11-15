@@ -13,10 +13,11 @@
 # Optional:
 #   TRANSPORT         stdio | launch | http                        (default: stdio)
 #   HAYBARN_UNITTEST  path to haybarn-unittest   (default: the one on PATH)
-#   PYTHON            command for the mock API, may contain spaces (default: python3)
+#   PYTHON            command for the fixture server, may contain spaces (default: python3)
 #   MIN_EXECUTED      fail if fewer test cases ran (default: 1)
 #   EXPECTED_SKIP_REASONS  newline-separated skip reasons that are allowed,
 #                     e.g. "require-env GRAFANA_LIVE". Any other skip fails.
+#   GRAFANA_RECORD_UPSTREAM  live Grafana URL: record unrecorded responses
 #   RECIPES_WORKER    command that runs a recipe by name (`$RECIPES_WORKER <recipe>`);
 #                     when set, examples/test/*.test run too (stdio/launch only)
 #   KEEP_STAGE=1      keep the staged test tree for debugging
@@ -71,13 +72,18 @@ start_server() {
   echo "::error::'$*' never printed PORT:<n>"; cat "$log"; return 1
 }
 
-# The mock APIs fetch_items is tested against. The plain one rate-limits every
-# page once (429 + Retry-After) so the retry path is always exercised.
-unset GRAFANA_API_TOKEN
-MOCK_API_FLAKY=1 start_server "$STAGE/mock.log" $PYTHON "$REPO/test/mock_api/server.py"
-export GRAFANA_MOCK_API="http://127.0.0.1:$PORT"
-MOCK_API_TOKEN=test-token start_server "$STAGE/mock-auth.log" $PYTHON "$REPO/test/mock_api/server.py"
-export GRAFANA_MOCK_API_AUTH="http://127.0.0.1:$PORT"
+# The fixture API servers replay recorded Grafana responses
+# (test/fixture_server, strict: an unrecorded request is a 404). The plain one
+# answers every request with 429 + Retry-After once, so the retry path is
+# always exercised; the auth one demands a token or basic login plus
+# X-Grafana-Org-Id: 1. With GRAFANA_RECORD_UPSTREAM set they forward
+# unrecorded requests to that live Grafana and save the answers.
+REC=()
+[ -n "${GRAFANA_RECORD_UPSTREAM:-}" ] && REC=(--record "$GRAFANA_RECORD_UPSTREAM")
+FIXTURE_FLAKY=1 start_server "$STAGE/fixture.log" $PYTHON "$REPO/test/fixture_server/server.py" ${REC[@]+"${REC[@]}"}
+export GRAFANA_FIXTURE_URL="http://127.0.0.1:$PORT"
+FIXTURE_REQUIRE_AUTH=1 start_server "$STAGE/fixture-auth.log" $PYTHON "$REPO/test/fixture_server/server.py" ${REC[@]+"${REC[@]}"}
+export GRAFANA_FIXTURE_AUTH_URL="http://127.0.0.1:$PORT"
 
 HTTP=0
 case "$TRANSPORT" in
