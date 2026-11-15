@@ -1,300 +1,319 @@
-<!-- managed-by: vgi-starters (edit upstream in shared/README.md.tmpl, then run tools/render.py) -->
 <p align="center">
   <img src="https://query.farm/media-kit/products/vgi/vgi-logo.png" alt="Vector Gateway Interface (VGI)" width="320">
 </p>
 
-<p align="center"><em>A Query.Farm VGI worker for DuckDB, written in Go.</em></p>
+# Query Grafana Dashboards, Alerting and Data Sources With SQL in DuckDB
 
-# VGI Grafana Worker — Go
+> **vgi-grafana** · a [Query.Farm](https://query.farm) VGI worker
 
 [![CI](https://github.com/Query-farm/vgi-grafana/actions/workflows/ci.yml/badge.svg)](https://github.com/Query-farm/vgi-grafana/actions/workflows/ci.yml)
 [![vgi worker: query.farm](https://query.farm/media-kit/shields/vgi-worker.svg)](https://query.farm)
 
-[VGI](https://query.farm/vgi) lets DuckDB call functions that live in a separate
-process: your code, in any language, exposed as ordinary SQL. This worker adds
-three example functions that you rename and replace with your own:
+Grafana knows which dashboards exist, what every panel queries, who changed what, which
+alerts fire and where they are routed, but it only shows you one screen at a time. This
+worker turns the **Grafana HTTP API** (Grafana OSS, Enterprise and Grafana Cloud) into SQL
+tables in DuckDB, so you can audit, inventory and join all of it, and run **any Grafana
+data source query** from SQL through Grafana itself.
 
-| Function | Kind | Shows you how to |
-|---|---|---|
-| `greet(name)` / `greet(name, style)` | scalar | vectorize over a column, overload, constrain a constant |
-| `sequence_table(count, step := 1)` | table | stream rows in batches, take named arguments |
-| `fetch_items(base_url, page_size := 100)` | table | page through a REST API, retry, read a secret |
+- **Content inventory**: dashboards, nested folders with full paths, every panel and every
+  panel query flattened (PromQL `expr`, SQL `rawSql`, ...), version history, library panels,
+  data sources. The BI tables use the same column names as
+  [vgi-looker](https://github.com/Query-farm/vgi-looker), vgi-tableau and vgi-metabase, so a
+  cross-tool inventory is one `UNION ALL BY NAME`.
+- **Access**: users and org roles, teams and members, service accounts, organizations.
+- **Alerting**: rule definitions and their query chains, groups, live states, contact points,
+  the notification policy tree flattened, mute timings, Alertmanager alerts and silences,
+  state transitions.
+- **Annotations** with the time window, dashboard, panel, tag and type pushed to Grafana.
+- **`ds_query`**: run a query against any data source (Prometheus, Loki, PostgreSQL,
+  CloudWatch, TestData, ...) via `POST /api/ds/query` and get long rows
+  (`labels` MAP, `ts`, `value`), the same shape as
+  [vgi-prometheus](https://github.com/Query-farm/vgi-prometheus).
 
+It is **read-only**: every request is a `GET`, plus `POST /api/ds/query`, which runs a query
+and saves nothing. **No secret leaves Grafana**: data source passwords and secure fields,
+URL user info, contact point settings and service account tokens are never returned.
 
 ## Quick start
 
-**Prerequisites:** Go 1.26+ and [uv](https://docs.astral.sh/uv/) (it runs the SQL
-test runner and the metadata checker).
-
-```bash
-make build
-```
-
-Then open DuckDB 2.0 or [Haybarn](https://query.farm/products/haybarn) and attach the
-worker. `LOCATION` is the command DuckDB runs to start it; use an absolute path,
-because a relative one resolves against DuckDB's working directory.
-
-**DuckDB 2.0:**
-
 ```sql
-SET allow_extension_repositories = 'allowed';
-CREATE EXTENSION REPOSITORY IF NOT EXISTS query_farm WITH PREFIX 'https://duckdb-extensions.query.farm';
-INSTALL vgi FROM query_farm;
-LOAD vgi FROM query_farm;
-ATTACH 'grafana' (TYPE vgi, LOCATION '/abs/path/to/vgi-grafana/bin/vgi-grafana-worker');
-```
-
-**Haybarn 2.0** (`uvx haybarn-cli`):
-
-```sql
-INSTALL vgi FROM community;
+INSTALL vgi FROM community;     -- Haybarn 2.0; on DuckDB 2.0 use the query_farm repository
 LOAD vgi;
-ATTACH 'grafana' (TYPE vgi, LOCATION '/abs/path/to/vgi-grafana/bin/vgi-grafana-worker');
+ATTACH 'grafana' (TYPE vgi, LOCATION 'github-auto://Query-farm/vgi-grafana@v0.1.0');
+
+CREATE SECRET (TYPE grafana, BASE_URL 'https://grafana.example.com', TOKEN 'glsa_...');
+
+-- Which dashboards query Prometheus, and with what?
+SELECT dashboard_title, panel_title, expr
+FROM grafana.main.panel_queries
+WHERE datasource_type = 'prometheus'
+ORDER BY dashboard_title, panel_title;
 ```
 
-Now call the functions:
+The secret type is registered by the worker, so run `CREATE SECRET` after `ATTACH`.
 
-```sql
-SELECT grafana.main.greet('Ada');                         -- Hi, Ada!
-SELECT grafana.main.greet('Ada', 'formal');               -- Good day, Ada.
-SELECT * FROM grafana.main.sequence_table(5, step := 2) ORDER BY n;
-```
+<details><summary>Other ways to run it</summary>
 
-`fetch_items` pages through a REST API. Try it against the public demo API (25 fixed items):
+- **DuckDB 2.0**:
+  `SET allow_extension_repositories = 'allowed'; CREATE EXTENSION REPOSITORY IF NOT EXISTS query_farm WITH PREFIX 'https://duckdb-extensions.query.farm'; INSTALL vgi FROM query_farm; LOAD vgi FROM query_farm;`
+  then attach as above.
+- **Docker** (HTTP): `docker run -p 8000:8000 ghcr.io/query-farm/vgi-grafana:0.1.0`, then
+  `ATTACH 'grafana' (TYPE vgi, LOCATION 'http://localhost:8000')`.
+- **Go**: `go install github.com/Query-farm/vgi-grafana/cmd/vgi-grafana-worker@v0.1.0`,
+  then attach the binary by absolute path.
+- **From source**: `make build` (Go 1.26+, pure Go, no cgo), then
+  `ATTACH 'grafana' (TYPE vgi, LOCATION '/abs/path/to/bin/vgi-grafana-worker')`.
 
-```sql
-SELECT category, count(*) AS items, round(avg(price), 2) AS avg_price
-FROM grafana.main.fetch_items('https://vgi-starter-api.query-farm.services/v1')
-GROUP BY category ORDER BY category;
-```
-
-If an older cached extension misbehaves, refresh it with `FORCE INSTALL vgi FROM query_farm;`
-(DuckDB) or `FORCE INSTALL vgi FROM community;` (Haybarn).
-
-## Using it in a pipeline
-
-Worker functions compose with everything else in DuckDB:
-
-```sql
--- Materialize an API into a local table.
-CREATE TABLE items AS SELECT * FROM grafana.main.fetch_items('https://vgi-starter-api.query-farm.services/v1');
-
--- Join it with local files.
-SELECT i.name, i.price, s.units
-FROM items i JOIN 'sales.parquet' s ON s.item_id = i.id;
-
--- Call a scalar per row of another table.
-SELECT customer, grafana.main.greet(customer, 'formal') FROM read_csv('customers.csv');
-```
-
-## Project layout
-
-```
-cmd/vgi-grafana-worker/  # main.go: the worker binary (flags -> serve.Main)
-internal/grafana/
-  worker.go        # assembles the catalog; register new functions in NewWorker
-  meta.go          # catalog/schema metadata + helpers (objectTags, column)
-  greet.go         # scalar example (overloads, constant arg with choices)
-  sequence.go      # table function example (named args, streaming state)
-  fetch_items.go   # REST API table function (pagination, retries, secrets)
-  version.go       # the worker version (checked against release tags)
-  *_test.go        # go test unit tests
-internal/serve/    # --http / --unix / stdio and logging flags, shared with recipes
-test/sql/          # sqllogictest files run through DuckDB
-test/mock_api/     # offline mock of the REST API used by tests
-examples/          # recipes (one package main, served by bin/recipes <name>)
-ci/                # integration harness used by `make test-sql` and CI
-scripts/           # vgi_template.py (init / template-diff)
-vgi-agent-tests.yaml  # private graders for the agent test tasks
-```
-
-## Adding a function
-
-1. Create `internal/grafana/<name>.go`. Copy the closest example: `greet.go` for a
-   scalar, `sequence.go` for a generator, `fetch_items.go` for an API.
-2. Declare arguments as a struct with `vgi:"..."` tags. Use `pos=N` for positional
-   arguments and `default=V` (no `pos`) for named ones; add `ge=`, `le=`, `pattern=` or
-   `choices='a,b'` constraints. Scalar column arguments are `*array.String` (etc.) fields
-   with `const=false`. `doc=` must be the last key in the tag.
-3. Implement `Name()`, `Metadata()` (with `Description`, `Tags: withExamples(objectTags(...), examples)`
-   and `Examples`), then `OnBindTyped`/`ProcessTyped` (scalar, wrap with
-   `vgi.AsScalarFunction[Args]`) or `ArgumentSpecs`/`OnBind`/`NewState`/`Process` (table,
-   wrap with `vgi.AsTableFunction[State]`).
-4. Register it in `NewWorker` in `internal/grafana/worker.go`, and add its examples to
-   `allExamples`.
-
-**Which kind of function?**
-
-| You want to… | Use |
-|---|---|
-| compute one value per input row | a **scalar** function |
-| return a set of rows from arguments (an API, a file, a generator) | a **table** function |
-| transform or aggregate the rows of a query | a **table in-out** function or an **aggregate** |
-| expose a fixed dataset by name (`SELECT * FROM grafana.main.t`) | a **catalog table** |
-| write data out to a file or service | `COPY … TO` with a copy function |
-| accept `INSERT` / `UPDATE` / `DELETE` | a catalog table with insert/update/delete functions |
-
-The [examples/](examples/) folder has a recipe for most of these. Writable tables have no
-recipe:
-
-A writable table is a `vgi.CatalogTable` that names a table in-out function per operation in
-`InsertFunction`, `UpdateFunction` and `DeleteFunction`, with the richest result each one
-produces in `WriteResultModes`. A write function declares `vgi.WriteOptionsArgSpec()`, reads
-the requested mode with `vgi.ParseWriteOptions`, and binds and emits
-`vgi.WriteResultSchema` / `vgi.WriteResultBatch`. UPDATE and DELETE need a `vgi.RowIDField`
-column emitted by a scan that declares projection pushdown. Transactions:
-`vgi.WithSupportsTransactions` (or `AttachDecision.SupportsTransactions` per ATTACH) and
-`vgi.WithTransactionHooks`. Since VGI protocol 3.3 a table's scan and write functions are
-table-only: hidden from `duckdb_functions()` and not callable from SQL. Set `ExposeScan: true`
-on the table to keep the scan callable as an ordinary table function too (write functions never
-are). The write helpers and transaction hooks need vgi-go v0.42.0 or newer: if `go.mod` has an
-older v0.42.x, run `go get github.com/Query-farm/vgi-go@v0.42` (the newest v0.42.x; every
-v0.42.x speaks the same protocol). See
-[Writable catalog tables](https://github.com/Query-farm/vgi-go#writable-catalog-tables) and
-[`examples/writable_tx`](https://github.com/Query-farm/vgi-go/tree/main/examples/writable_tx).
+v0.1.0 is not published yet. Until it is, build from source.
+</details>
 
 ## Secrets and configuration
 
-`fetch_items` shows the recommended pattern. A bearer token comes from a DuckDB secret
-when one exists, and from an environment variable otherwise:
+Every table reads a DuckDB secret of type `grafana`:
+
+| Field | Meaning |
+|---|---|
+| `BASE_URL` | Grafana root, e.g. `https://grafana.example.com`, `https://acme.grafana.net`, or `https://example.com/grafana` when served from a sub-path. Must not contain `user:password@`. |
+| `TOKEN` | Service account token or API key, sent as `Authorization: Bearer …`. Redacted. |
+| `USERNAME` / `PASSWORD` | Basic auth (used when no `TOKEN` is set). Password redacted. |
+| `ORG_ID` | Sent as `X-Grafana-Org-Id`: read another organization than the credential's current one. |
+| `PAGE_SIZE` | Page size for paged endpoints (search, users, teams, service accounts, library panels, annotations); default 1000. |
 
 ```sql
-CREATE SECRET (TYPE grafana_api, TOKEN 'your-token');      -- per session, never logged
+-- Grafana Cloud with a service account token
+CREATE SECRET cloud (TYPE grafana, BASE_URL 'https://acme.grafana.net', TOKEN 'glsa_...');
+-- Self-hosted, second organization, basic auth
+CREATE SECRET partner (TYPE grafana, BASE_URL 'https://grafana.internal', USERNAME 'auditor', PASSWORD '...', ORG_ID '2');
+
+-- Several Grafanas at once: one ATTACH per instance, each naming its secret.
+ATTACH 'grafana' AS cloud (TYPE vgi, LOCATION '...', secret_name 'cloud');
+ATTACH 'grafana' AS partner (TYPE vgi, LOCATION '...', secret_name 'partner');
+SELECT * FROM cloud.main.dashboards UNION ALL BY NAME SELECT * FROM partner.main.dashboards;
+
+-- The table functions also take secret_name := directly.
+SELECT * FROM grafana.main.search(query := 'latency', secret_name := 'partner');
 ```
 
-```bash
-GRAFANA_API_TOKEN=your-token make run-http                # for servers and containers
-```
+With more than one `grafana` secret and no `secret_name`, DuckDB picks one of them, so name
+the secret explicitly. Credentials are read from the secret on every request and never enter
+table-function state, logs or error messages. With Grafana's default roles a **Viewer** service
+account can read dashboards, panels, versions, folders, search, annotations, rule groups and
+states, alerts and silences, and run `ds_query` on data sources it may query; data sources,
+users, teams, service accounts and the provisioning-API alerting tables (`alert_rules`,
+`alert_rule_queries`, `contact_points`, `notification_policies`, `mute_timings`) need
+**Admin** (or the matching RBAC read permissions), and listing every org needs a **server
+admin** (otherwise `orgs` returns the current org). These are Grafana's defaults, not
+verified against every RBAC setup.
+Requests that get 429, 502, 503 or 504 are retried with exponential backoff, honouring
+`Retry-After`; other errors carry the HTTP status and Grafana's message.
 
-Try it: the demo API's `/v1/auth` endpoint needs the published token `demo-token`.
+## What's inside
 
-```sql
-SELECT count(*) FROM grafana.main.fetch_items('https://vgi-starter-api.query-farm.services/v1/auth');   -- fails: HTTP 401
-CREATE SECRET (TYPE grafana_api, TOKEN 'demo-token');
-SELECT count(*) FROM grafana.main.fetch_items('https://vgi-starter-api.query-farm.services/v1/auth');   -- 25
-```
+Everything is in `grafana.main`. Catalog tables are read without parentheses.
 
-Never bake credentials into the image or the source. If a function can't run without
-real credentials, its examples can't execute in CI either. Set `execute: false` on the
-metadata check for that worker (see `.github/workflows/ci.yml`), and add
-`LINT_ARGS ?= --no-execute` to the Makefile so local runs match.
-
-## Testing
-
-```bash
-make test-unit                 # fast Go unit tests
-make test-sql                  # test/sql/*.test through DuckDB (stdio)
-make test-sql TRANSPORT=http   # …over HTTP (also: launch)
-make check                     # everything CI runs
-```
-
-`test/sql/*.test` files are [sqllogictest](https://duckdb.org/docs/stable/dev/sqllogictest/intro)
-scripts. `ci/run-integration.sh` runs them against your worker and fails on any
-unexpected skip, so a broken transport can't hide behind a green run.
-`fetch_items` is tested against `test/mock_api/server.py` so tests are fast and
-offline.
-
-**Testing against real data:** put live tests in their own `.test` file that starts with
-`require-env GRAFANA_LIVE`. They run only when that variable is set. Add the skip reason
-to `EXPECTED_SKIP_REASONS` in CI.
-
-## Metadata and the quality score
-
-DuckDB, agents and documentation tools discover your functions through their metadata:
-titles, descriptions, argument docs, examples and keywords.
-[vgi-lint](https://github.com/Query-farm/vgi-lint-check) checks it, and CI runs it on
-every push. Its settings live in `vgi-lint.toml`, which `make lint-explain`,
-`vgi-lint lint`, and CI all read. This template scores 100/100 with no findings.
-
-```bash
-make lint-explain                              # findings, each with its fix
-make lint-explain LINT_ARGS="--format agent"   # the same, grouped for coding agents
-make lint-ai                                   # optional: an agent must solve vgi-agent-tests.yaml
-```
-
-Each report also states an **assurance level**: how much was actually verified.
-
-| Level | Reached when | Here |
+| Object | Rows | Grafana API |
 |---|---|---|
-| L1 structural | the static metadata is clean | workers that need real credentials (`execute: false` in CI) |
-| L2 behavioural | the examples also run and return what they claim | **the CI gate** |
-| L3 semantic | an agent solves the worker's own test tasks, and the docs are reviewed | `make lint-ai`, before publishing |
+| `dashboards` | one per dashboard (BI shape + tags, version, panel count, JSON) | `/api/search`, `/api/dashboards/uid/<uid>` (only when a detail column is selected) |
+| `folders` | one per folder, nested ones included, with `parent_uid`, `depth`, `folder_path` | `/api/search?type=dash-folder`, `/api/folders/<uid>` |
+| `panels` | every panel, panels inside collapsed rows included: type, data source, grid, targets JSON | `/api/dashboards/uid/<uid>` per dashboard |
+| `panel_queries` | every panel query: effective data source, `expr`, `raw_sql`, `query_text`, target JSON | same |
+| `dashboard_versions` | saved versions: author, time, message | `/api/dashboards/uid/<uid>/versions` |
+| `library_panels` | library panels with usage counts and model | `/api/library-elements` |
+| `connections` | data sources: type, endpoint (credentials stripped), database, access, masked `json_data` | `/api/datasources` |
+| `search(query :=, tags :=, type :=, folder_uids :=, starred :=)` | Grafana search | `/api/search` |
+| `users` | org users with role, last seen, disabled | `/api/org/users/search` |
+| `teams`, `team_members` | teams and membership | `/api/teams/search`, `/api/teams/<id>/members` |
+| `service_accounts` | service accounts with token counts (never tokens) | `/api/serviceaccounts/search` |
+| `orgs` | organizations | `/api/orgs` (`/api/org` fallback) |
+| `health` | version, commit, database status | `/api/health` |
+| `alert_rules` | rule definitions: folder, group, condition, for, no-data / error state, labels, annotations, queries | `/api/v1/provisioning/alert-rules` |
+| `alert_rule_queries` | each rule's queries and expressions | same |
+| `rule_groups` | groups with interval and counts | `/api/prometheus/grafana/api/v1/rules` |
+| `alert_rule_states` | live state, health, last error, instance count | same |
+| `contact_points` | name, integration type, target **host only**, setting names (no values) | `/api/v1/provisioning/contact-points` |
+| `notification_policies` | the routing tree, one row per route, inherited values resolved | `/api/v1/provisioning/policies` |
+| `mute_timings` | named mute windows | `/api/v1/provisioning/mute-timings` |
+| `alerts` | Alertmanager alert instances | `/api/alertmanager/grafana/api/v2/alerts` |
+| `silences` | Alertmanager silences | `/api/alertmanager/grafana/api/v2/silences` |
+| `alert_state_transitions` | rule state changes over time | `/api/v1/rules/history` (annotation-backed history) |
+| `annotations` | events and regions, alert annotations included | `/api/annotations` |
+| `ds_query(datasource_uid, query_json, start_time, end_time)` | data frames as long rows | `POST /api/ds/query` |
+| `duration_seconds(d)`, `redact_url(url)` | offline scalars | none |
 
-- **How strict.** Your copy fails on warnings (`fail_on = "warning"` in `vgi-lint.toml`).
-  Raise it to `"info"` before you publish the worker for others.
-- **The linter isn't pinned.** It tracks the current quality bar, so a new rule can flag
-  metadata that passed yesterday. Fix it, or waive the finding.
-- **Waivers.** If a finding is genuinely wrong for your worker, waive it in
-  `vgi-lint.toml` with a `kind` and a `reason`.
-- **Existing workers.** If you're adding this gate to a worker that already has
-  findings, record them with `vgi-lint lint --baseline vgi-lint-baseline --update-baseline`
-  and set `baseline` in `vgi-lint.toml`. After that, only new findings fail.
+### Shared BI columns (UNION across Grafana, Looker, Tableau and Metabase)
 
-Metadata lives in `internal/grafana/meta.go` and each function's `Metadata()`.
+| Column | Type | Meaning in Grafana |
+|---|---|---|
+| `tool` | `VARCHAR` | Always `'grafana'` |
+| `id` | `VARCHAR` | UID (dashboards, folders, data sources), numeric user id as text (users) |
+| `title` | `VARCHAR` | Dashboard, folder or data source name |
+| `folder_path` | `VARCHAR` | `/Operations/Web`: the folder chain from the root; `/` is the General folder |
+| `owner` | `VARCHAR` | Login of the creating user |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | Creation / last save |
+| `last_viewed_at` / `view_count` | `TIMESTAMPTZ` / `BIGINT` | `NULL`: Grafana OSS has no view statistics API |
+| `url` | `VARCHAR` | Link into the Grafana UI |
 
-## Logging and debugging
-
-stdout carries the Arrow protocol, so **never print to stdout**. Log to stderr instead.
-Use `log/slog` (the SDK configures it to write to stderr); `--debug` or `--log-level debug` turns it up.
-
-- Under DuckDB (stdio/launch), worker stderr shows up in DuckDB's error messages and
-  terminal.
-- In Docker it goes to `docker logs`.
-- `make debug` runs one query against the worker with debug logging on.
-
-## Deploying
-
-The same binary serves stdio (DuckDB starts it locally) or HTTP (you host it):
-
-```bash
-docker build -t weather-worker .
-docker run -p 8000:8000 -e GRAFANA_API_TOKEN=... weather-worker   # health: GET /health
-```
+`dashboards` and `folders` carry all of them; `connections` has `tool, id, title, created_at
+(NULL), url`; `users` has `tool, id, url` plus `login`, `display_name`, `email`.
 
 ```sql
-ATTACH 'grafana' (TYPE vgi, LOCATION 'https://workers.example.com/grafana');
+SELECT tool, id, title, folder_path, owner, updated_at, url FROM grafana.main.dashboards
+UNION ALL BY NAME
+SELECT tool, id, title, folder_path, owner, updated_at, url FROM looker.main.dashboards;
 ```
 
-Put hosted workers behind TLS and authentication. See
-[authentication](https://query.farm/vgi/authentication) for bearer tokens and JWTs, and
-[distributing a worker](https://query.farm/vgi/distributing-a-worker) for packaging.
-Pass secrets with `-e` or your platform's secret manager.
+### `ds_query` output
 
-## Releasing
+One row per (frame row, non-time field): `ref_id`, `frame_index`, `frame_name`,
+`frame_type` (dataplane type such as `timeseries-multi`), `field`, `labels`
+`MAP(VARCHAR, VARCHAR)` (the field's labels, e.g. Prometheus series labels), `row_index`,
+`ts` (the frame's first time field; `NULL` for table frames), `value DOUBLE` (numbers, with
+NaN and ±Inf decoded from the frame's entities; booleans as 1/0), `string_value` (strings,
+booleans, enums, extra time fields), `unit`. `query_json` is the data source's own query
+model, exactly as a panel target stores it, so you can copy one from
+`panel_queries.target_json`; a JSON array runs several queries in one request (`refId`
+defaults to A, B, ...). `max_data_points :=` and `interval_ms :=` are passed through.
 
-Push a tag like `v0.1.0`. The release workflow builds signed binaries for linux (amd64, arm64), macOS (arm64) and Windows (amd64) as static pure-Go binaries, and attaches them to the GitHub release. Users download the archive for their platform and point `LOCATION` at the binary inside. Go developers can also `go install github.com/Query-farm/vgi-grafana/cmd/vgi-grafana-worker@v0.1.0`. Every artifact is signed with cosign and
-carries SLSA build provenance. `ci/check-version.sh` makes sure the tag matches the
-version in `internal/grafana/version.go`.
+Limits: the whole response is decoded in one batch (bounded at 512 MiB per response); the
+data source's own limits apply (Grafana's `[dataproxy] row_limit`, default 1,000,000 rows
+for SQL data sources; Prometheus' 11,000 points per series, which Grafana enforces through
+`maxDataPoints` / `intervalMs`). Only Grafana's query API is used, so data sources that
+only work from the browser (`access: direct`) cannot be queried. A failed query fails the
+SQL statement with its `refId` and the data source's error.
 
-## Using with coding agents
+## What pushes down
 
-[AGENTS.md](AGENTS.md) is written for AI coding agents (Claude Code reads it via
-`CLAUDE.md`; Codex, Cursor and others read it directly). It covers the commands, the
-recipe for adding a function, the metadata checklist and the sharp edges. A good first
-prompt:
+Every table declares filter and projection pushdown. DuckDB removes a pushed predicate
+from its own plan, so the worker **re-applies every pushed filter exactly**; translating it
+to API parameters only narrows what is fetched.
 
-> Read AGENTS.md. Replace `fetch_items` with `forecast(lat DOUBLE, lon DOUBLE)` that calls
-> the Open-Meteo API. Include full metadata, a mock-server test and a `GRAFANA_LIVE` test.
-> You're done when `make check` passes.
+| SQL | Becomes |
+|---|---|
+| `dashboards`: `id = / IN`, `folder_uid = / IN`, `list_contains(tags, 'x')`, `is_starred` | `dashboardUIDs`, `folderUIDs`, `tag` (all must match), `starred=true` |
+| `search(...)`: the arguments, and `WHERE kind / uid / folder_uid / is_starred / list_contains(tags, …)` | `query`, `tag`, `type`, `folderUIDs`, `dashboardUIDs`, `starred` |
+| `panels`, `panel_queries`: `dashboard_uid = / IN`, `folder_uid = / IN` | only those dashboards are read (one request each) |
+| `dashboard_versions`: `dashboard_uid = / IN` | only those dashboards' histories |
+| `library_panels`: `folder_uid = / IN`, `name = 'x'` | `folderFilterUIDs`, `searchString` |
+| `team_members`: `team_id = / IN`; `teams`: `name = 'x'` | only those teams; `name` |
+| `users`: `login = 'x'`; `service_accounts`: `name = 'x'` | `query` |
+| `alert_state_transitions`: `rule_uid = / IN`, `time` ranges | `ruleUID` per rule, `from` / `to` |
+| `annotations`: `time >= / > / < / <= / = / BETWEEN`, `dashboard_uid = 'x'`, `panel_id = n`, `type = 'alert' / 'annotation'`, `list_contains(tags, 'x')` | `from` / `to`, `dashboardUID`, `panelId`, `type`, `tags` |
 
-## Keeping up with the template
+Detail columns are fetched only when selected: `dashboards.owner`, `created_at`,
+`updated_at`, `version`, `panel_count`, `dashboard_json`, ... cost one request per dashboard,
+and `folders.owner` / dates one per folder.
 
-`make template-diff` shows what changed upstream (CI, docs, examples) since your copy was
-made. Your copy records its template version in `.vgi-grafana.json`.
+**Annotations paging.** `/api/annotations` has a limit but no offset, and orders rows by a
+mix of start and end times, so the scan partitions the start-time range into windows: a
+window whose page comes back full is split at the oldest start on the page (or, when
+regions overlapping the window crowd the page, re-read with a larger limit), until no page
+is truncated. Every annotation is read from exactly one window. The window stack, like
+every cursor (page numbers, pending dashboard UIDs, version `continueToken`s), is part of
+the scan state, so over the HTTP transport each page can be served by a different request.
 
-## Learn more
+## Examples
 
-- [What is VGI?](https://query.farm/vgi) · [Getting started](https://query.farm/vgi/getting-started) · [Building a worker](https://query.farm/vgi/building-a-worker)
-- [Go SDK docs](https://query.farm/vgi/docs/go/): [scalar tutorial](https://query.farm/vgi/docs/go/tutorial/scalar/), [table tutorial](https://query.farm/vgi/docs/go/tutorial/table/)
-- [Distributing a worker](https://query.farm/vgi/distributing-a-worker) · [Choosing a language](https://query.farm/vgi/languages) · [llms.txt](https://query.farm/vgi/llms.txt)
-- SDK source: [vgi-go](https://github.com/Query-farm/vgi-go) · RPC layer: [https://vgi-rpc-go.query.farm](https://vgi-rpc-go.query.farm)
+```sql
+-- Dashboards per folder, and who owns the stale ones.
+SELECT folder_path, count(*) AS dashboards FROM grafana.main.dashboards GROUP BY folder_path ORDER BY dashboards DESC;
+SELECT title, owner, updated_at FROM grafana.main.dashboards WHERE updated_at < now() - INTERVAL 1 YEAR ORDER BY updated_at;
+
+-- Data sources nobody uses.
+SELECT c.title, c.type FROM grafana.main.connections c
+ANTI JOIN grafana.main.panel_queries q ON q.datasource_uid = c.id;
+
+-- Which dashboards would break if http_requests_total were renamed?
+SELECT DISTINCT dashboard_title, panel_title FROM grafana.main.panel_queries WHERE expr LIKE '%http_requests_total%';
+
+-- Firing alerts, their rule's folder and where they are routed.
+SELECT a.alertname, r.folder_path, a.receivers, a.starts_at
+FROM grafana.main.alerts a JOIN grafana.main.alert_rules r ON r.uid = a.rule_uid
+WHERE a.state = 'active' ORDER BY a.starts_at;
+
+-- Deploy annotations next to a metric, both from Grafana.
+WITH deploys AS (SELECT time FROM grafana.main.annotations
+                 WHERE list_contains(tags, 'deploy') AND time >= now() - INTERVAL 1 DAY)
+SELECT q.ts, q.value, d.time IS NOT NULL AS deploy
+FROM grafana.main.ds_query('prom-prod', '{"expr": "sum(rate(http_requests_total{code=~\"5..\"}[5m]))"}',
+                           now() - INTERVAL 1 DAY, now(), interval_ms := 60000) q
+LEFT JOIN deploys d ON date_trunc('minute', d.time) = q.ts ORDER BY q.ts;
+```
+
+## How it is tested
+
+`make check` runs gofmt, go vet, golangci-lint, `go test`, the SQL suite
+(`test/sql/grafana.test`, 100+ statements) over the stdio, launch and HTTP transports, and
+vgi-lint at `fail_on = "info"`.
+
+**CI needs no Docker and no credentials.** The SQL suite talks to
+`test/fixture_server/server.py`, a **strict replay server**: it answers from
+`test/fixture_server/recorded.json`, keyed by method, path, sorted query and canonical JSON
+body, and returns 404 for anything unrecorded, so a changed request fails the tests. A few
+hand-written responses in `handwritten.json` (made by `make_handwritten.py`) cover shapes a
+stock server will not produce on demand: a failing data source, NaN/±Inf entities with
+nanosecond time offsets, and a credential that may not list orgs. The runner starts two
+copies: one answers every request with `429 + Retry-After: 0` once (so retries are always
+exercised), the other demands `Bearer test-token` or basic auth plus `X-Grafana-Org-Id: 1`.
+The suite uses `PAGE_SIZE '2'` so every paged endpoint, the annotation window splitting and
+the HTTP continuation of multi-page scans are exercised.
+
+**The recordings come from a real Grafana.** `test/fixture/run-grafana.sh start` runs
+`grafana/grafana-oss:12.1.1` (about 110 MB RAM, capped at 512 MB), provisioned from files
+(TestData, Prometheus and PostgreSQL data sources with fake secrets, a file dashboard, alert
+rules, contact points, a nested notification policy tree, mute timings), then
+`test/fixture/seed.py` adds nested folders, dashboards with two versions and a collapsed row,
+a library panel, users, teams, a service account, a second org, annotations at fixed 2026
+times and a silence, and waits until an alert fires. Grafana's built-in TestData data source
+makes `ds_query` deterministic offline (`csv_metric_values`, `csv_content`,
+`predictable_pulse`). The SQL suite also checks that none of the fake secrets
+(`hunter2`, `do-not-leak-*`) appears in any output. To re-record after changing the tests:
+
+```bash
+test/fixture/run-grafana.sh start            # prints http://127.0.0.1:13000
+rm test/fixture_server/recorded.json
+GRAFANA_RECORD_UPSTREAM=http://127.0.0.1:13000 make test-sql
+test/fixture/run-grafana.sh stop
+```
+
+Recording forwards to the fixture with its throwaway `admin:admin` login. Timestamps that
+Grafana sets itself (creation times, alert start times) change with every recording.
+Point the worker at either fixture through the secret's `BASE_URL`; there are no test-only
+code paths.
+
+## Known limitations
+
+- **Time zone.** vgi-go 0.42.0 cannot decode a pushed `TIMESTAMPTZ` filter (e.g.
+  `WHERE time >= TIMESTAMPTZ '…'` on `annotations`, `updated_at > …` on `dashboards`) in a
+  session whose `TimeZone` is not UTC: the query fails with "comparison operands have
+  incompatible types". Run `SET TimeZone = 'UTC'` first, or filter in a subquery DuckDB does
+  not push down.
+- A pushed filter the worker cannot evaluate exactly (arithmetic such as `col + 1 > 3` on
+  some types also hits an SDK decoding error) fails the query rather than returning wrong
+  rows; filter in a subquery or CTE instead.
+- `last_viewed_at` / `view_count` are `NULL`: Grafana OSS has no view statistics API
+  (Enterprise usage insights are not read).
+- Library panel instances in `panels` carry `library_panel_uid` but `NULL` title / type /
+  targets; join `library_panels` for those.
+- Alert state history is read from the annotation-backed history API; a Loki-backed history
+  is not read. Data source-managed (Prometheus / Mimir ruler) rules are not listed.
+- Panel ids are not guaranteed unique by Grafana, so `panels` and `panel_queries` declare no
+  primary key; `contact_points` and `alert_state_transitions` have no natural key either.
+- No TLS client certificates (put a proxy in front, or use a token).
+
+## Development
+
+See [AGENTS.md](AGENTS.md) for the layout, the recipe for adding a table and the sharp
+edges. `make help` lists the targets; `make template-diff` shows upstream starter changes
+(this worker started from vgi-starter-go v1.3.0).
 
 ## Support
 
 Open an issue on this repository. For VGI itself, see [query.farm](https://query.farm).
 
-## Authorship & license
+## Authorship & License
 
-The starter template is written by [Query.Farm](https://query.farm) and released under
-the [BSD Zero Clause License](LICENSE) (0BSD). Use it for anything, with no attribution
-required. Replace this section with your own license once the code is yours.
+Copyright 2026 Query Farm LLC - https://query.farm
+
+Released under the [BSD Zero Clause License](LICENSE) (0BSD). Grafana is a trademark of
+Grafana Labs; this worker is not affiliated with or endorsed by Grafana Labs or any vendor
+named here.

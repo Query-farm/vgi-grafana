@@ -23,16 +23,26 @@ Faster loops while iterating: `make test-unit`, `make test-sql`, `make lint-expl
 ```
 cmd/vgi-grafana-worker/  # main.go: the worker binary (flags -> serve.Main)
 internal/grafana/
-  worker.go        # assembles the catalog; register new functions in NewWorker
-  meta.go          # catalog/schema metadata + helpers (objectTags, column)
-  greet.go         # scalar example (overloads, constant arg with choices)
-  sequence.go      # table function example (named args, streaming state)
-  fetch_items.go   # REST API table function (pagination, retries, secrets)
+  worker.go        # assembles the catalog; list new tables in allDefs
+  meta.go          # catalog/schema metadata, categories, agent tasks + helpers
+  client.go        # secret -> connection, HTTP GET/POST with retries, URL masking
+  table.go         # tableDef framework: scan state, pushdown, constraints, catalog tables
+  helpers.go       # record accessors, column constructors, folder paths, pushdown helpers
+  filters.go sqlparse.go  # pushed-filter capture and exact re-evaluation in the worker
+  values.go        # Go values -> Arrow batches
+  bi.go            # dashboards, folders, users, connections (shared BI shape), search
+  panels.go        # panels, panel_queries, dashboard_versions, library_panels
+  access.go        # orgs, teams, team_members, service_accounts, health
+  alerting.go      # alert rules, queries, groups, states, contact points, policies, ...
+  annotations.go   # annotations with time-window splitting
+  dsquery.go frames.go  # ds_query and data-frame decoding
+  tools.go         # offline scalars (duration_seconds, redact_url)
   version.go       # the worker version (checked against release tags)
   *_test.go        # go test unit tests
 internal/serve/    # --http / --unix / stdio and logging flags, shared with recipes
 test/sql/          # sqllogictest files run through DuckDB
-test/mock_api/     # offline mock of the REST API used by tests
+test/fixture_server/  # strict replay server: recorded.json (live Grafana) + handwritten.json
+test/fixture/      # live Grafana fixture (Docker, provisioning files, seed.py) used to record
 examples/          # recipes (one package main, served by bin/recipes <name>)
 ci/                # integration harness used by `make test-sql` and CI
 scripts/           # vgi_template.py (init / template-diff)
@@ -41,8 +51,9 @@ vgi-agent-tests.yaml  # private graders for the agent test tasks
 
 ## Recipe: add a function
 
-1. Create `internal/grafana/<name>.go`. Copy the closest example: `greet.go` for a
-   scalar, `sequence.go` for a generator, `fetch_items.go` for an API.
+1. Add a `tableDef` to the closest file (`bi.go`, `panels.go`, `access.go`, `alerting.go`)
+   for an API table, or a `textScalar` to `tools.go` for an offline scalar. Fan-out tables
+   (one request per dashboard / rule / team) follow `panels.go`'s `nextDashboard`.
 2. Declare arguments as a struct with `vgi:"..."` tags. Use `pos=N` for positional
    arguments and `default=V` (no `pos`) for named ones; add `ge=`, `le=`, `pattern=` or
    `choices='a,b'` constraints. Scalar column arguments are `*array.String` (etc.) fields
@@ -51,8 +62,9 @@ vgi-agent-tests.yaml  # private graders for the agent test tasks
    and `Examples`), then `OnBindTyped`/`ProcessTyped` (scalar, wrap with
    `vgi.AsScalarFunction[Args]`) or `ArgumentSpecs`/`OnBind`/`NewState`/`Process` (table,
    wrap with `vgi.AsTableFunction[State]`).
-4. Register it in `NewWorker` in `internal/grafana/worker.go`, and add its examples to
-   `allExamples`.
+4. List it in `allDefs` in `internal/grafana/worker.go` (scalars: `toolScalars` in `tools.go`).
+   Record its fixture responses: `test/fixture/run-grafana.sh start`, then
+   `GRAFANA_RECORD_UPSTREAM=http://127.0.0.1:13000 make test-sql`.
 
 Then, for every new function:
 
@@ -140,10 +152,14 @@ v0.42.x speaks the same protocol). See
 - **State must be serializable.** Table-function state (the `S` in `TypedTableFunc[S]`) is gob-encoded into the HTTP continuation token between batches, because each batch can be served by a different request or process. Keep the cursor in *exported* fields (gob silently drops unexported ones, so the scan would restart from row 0), keep it small, and never put secrets in it.
 - **Examples must be deterministic.** Add `ORDER BY`, and no `now()`, random values or
   network. Examples that hit a live API go in `examples`, not `executable_examples`.
-- **Credentials.** Read them from a DuckDB secret first (`CREATE SECRET (TYPE grafana_api, …)`),
-  then from an environment variable. Never put them in logs, examples or the repo, and
+- **Credentials.** Read them from the `grafana` DuckDB secret
+  (`CREATE SECRET (TYPE grafana, BASE_URL …, TOKEN …)`), never from environment variables. Never put them in logs, examples or the repo, and
   keep them out of table-function state unless the state rule above says
   the SDK encrypts it. Workers that need real credentials set `execute: false` on the metadata check.
+- **Pushed filters are dropped by DuckDB.** Every table declares filter pushdown, and DuckDB
+  removes a pushed predicate from its own plan, so `table.go` re-applies every pushed filter
+  exactly (`filters.go`); API parameters derived from filters only narrow the fetch. A filter
+  shape the evaluator cannot handle is an error, never a silent widening.
 - **Errors.** Raise errors with a clear message. For HTTP failures, include the status
   code. DuckDB shows the message to the user.
 - **Rate limits.** Retry 429 and 5xx with backoff, honour `Retry-After`, and set timeouts on
@@ -188,7 +204,7 @@ v0.42.x speaks the same protocol). See
 ## Useful prompts
 
 - "Add a scalar `slugify(text VARCHAR) -> VARCHAR` with full metadata and tests."
-- "Replace `fetch_items` with a table function for <API>. Map its JSON to typed columns,
-  read the token from a `grafana_api` secret, and add mock-server tests."
+- "Add a `playlists` catalog table for /api/playlists, record its fixture responses with
+  `GRAFANA_RECORD_UPSTREAM`, and add SQL tests."
 - "Add a catalog table `countries` (code, name) with a primary key, following
   `examples/catalog_tables`."

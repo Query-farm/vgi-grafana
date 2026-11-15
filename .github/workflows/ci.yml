@@ -96,8 +96,12 @@ jobs:
           location: ${{ github.workspace }}/bin/vgi-grafana-worker
           # Set in vgi-lint.toml, so local runs and CI agree.
           fail-on: ${{ steps.lintcfg.outputs.fail_on }}
-          # Set to false if your examples need real credentials or network access.
-          execute: true
+          # Credential-gated: every table (grafana.main.dashboards, panels, connections,
+          # alert_rules, annotations, ...) and the search / ds_query functions need a
+          # `grafana` secret (BASE_URL plus a service account token or basic login) for a
+          # live Grafana server, so examples are not executed here. The offline scalars
+          # and every table are covered by the SQL tests against the replay fixture.
+          execute: "false"
 
   docker:
     name: Docker image smoke test
