@@ -127,6 +127,11 @@ func resolveConn(secrets vgi.Secrets, name string) (*conn, error) {
 			return nil, errors.New("no grafana secret found: create one with CREATE SECRET (TYPE grafana, BASE_URL 'https://grafana.example.com', TOKEN '<service account token>') or USERNAME/PASSWORD for basic auth")
 		}
 	}
+	return connFromFields(fields)
+}
+
+// connFromFields turns a grafana secret's fields into a connection.
+func connFromFields(fields map[string]interface{}) (*conn, error) {
 	get := func(k string) string { return strings.TrimSpace(vgi.RenderSecretValue(fields[k])) }
 	base := strings.TrimRight(get("base_url"), "/")
 	if base == "" {

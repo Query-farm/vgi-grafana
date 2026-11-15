@@ -27,7 +27,6 @@ import (
 var (
 	tString  = arrow.BinaryTypes.String
 	tInt64   = arrow.PrimitiveTypes.Int64
-	tInt32   = arrow.PrimitiveTypes.Int32
 	tFloat64 = arrow.PrimitiveTypes.Float64
 	tBool    = arrow.FixedWidthTypes.Boolean
 	tTS      = &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
@@ -49,14 +48,6 @@ type jsonText string
 
 // structVal is a STRUCT value, one entry per field in declaration order.
 type structVal []any
-
-// nilIfEmpty turns "" into NULL.
-func nilIfEmpty(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
 
 // buildBatch writes rows (full-width, in full's order) into a batch with the
 // out schema, which may be a projection of full.

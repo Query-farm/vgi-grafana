@@ -395,9 +395,6 @@ func duckType(t arrow.DataType) string {
 	return t.String()
 }
 
-// errf is fmt.Errorf (kept short for table definitions).
-var errf = fmt.Errorf
-
 // tablesByName indexes allDefs for foreign-key targets.
 func tablesByName() map[string]*tableDef {
 	m := map[string]*tableDef{}
