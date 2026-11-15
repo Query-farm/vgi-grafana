@@ -196,6 +196,11 @@ func cKey(name, doc string, keys ...string) col {
 	}}
 }
 
+// cIntKey is a non-null BIGINT key column (0 when absent).
+func cIntKey(name, doc string, keys ...string) col {
+	return col{column(name, tInt64, doc, false), func(r rec, _ *scan) any { return intOr(i64(r, keys...)) }}
+}
+
 func cInt(name, doc string, keys ...string) col {
 	return col{column(name, tInt64, doc, true), func(r rec, _ *scan) any { return i64(r, keys...) }}
 }

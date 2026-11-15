@@ -51,8 +51,9 @@ func parseWindow(s string) (lo, hi int64, limit int) {
 var annotationsDef = &tableDef{
 	Name:    "annotations",
 	Catalog: true,
+	Key:     []string{"annotation_id"},
 	Docs: fnDocs{
-		Title:    "Annotations",
+		Title:    "Annotation Events And Regions",
 		Category: "annotations",
 		Keywords: "annotations, events, deploys, incidents, regions, alert annotations, timeline",
 		Description: "Annotations (events and time regions on dashboards or the whole org, plus alert state annotations) " +
@@ -74,7 +75,7 @@ var annotationsDef = &tableDef{
 	},
 	Cols: []col{
 		cTool(),
-		{column("id", tInt64, "Annotation id.", false), func(r rec, _ *scan) any { return intOr(i64(r, "id")) }},
+		{column("annotation_id", tInt64, "Numeric annotation identifier (assigned by Grafana, unique per instance).", false), func(r rec, _ *scan) any { return intOr(i64(r, "id")) }},
 		cFn("type", tString, "'alert' for alert state annotations, 'annotation' otherwise.", func(r rec, _ *scan) any {
 			if intOr(i64(r, "alertId")) > 0 {
 				return "alert"
@@ -94,22 +95,16 @@ var annotationsDef = &tableDef{
 			return ok && e > t
 		}),
 		cStr("text", "Annotation text.", "text"),
-		cList("tags", "Tags.", "tags"),
+		cList("tags", "Free-form labels attached to the annotation, e.g. [deploy, web].", "tags"),
 		cStr("dashboard_uid", "UID of the dashboard it belongs to; NULL for an org-wide annotation.", "dashboardUID"),
-		cFn("panel_id", tInt64, "Panel id it belongs to; NULL when not panel-specific.", func(r rec, _ *scan) any {
+		cFn("panel_id", tInt64, "Numeric identifier of the panel it belongs to (unique within dashboard_uid); NULL when not panel-specific.", func(r rec, _ *scan) any {
 			if n := intOr(i64(r, "panelId")); n != 0 {
 				return n
 			}
 			return nil
 		}),
-		cFn("dashboard_id", tInt64, "Numeric dashboard id; NULL for an org-wide annotation.", func(r rec, _ *scan) any {
-			if n := intOr(i64(r, "dashboardId")); n != 0 {
-				return n
-			}
-			return nil
-		}),
 		cStr("login", "Login of the author (NULL for alert annotations).", "login"),
-		cFn("alert_id", tInt64, "Alert rule id for alert annotations.", func(r rec, _ *scan) any {
+		cFn("rule_internal_id", tInt64, "Numeric alert rule identifier local to this instance (alert annotations only).", func(r rec, _ *scan) any {
 			if n := intOr(i64(r, "alertId")); n != 0 {
 				return n
 			}

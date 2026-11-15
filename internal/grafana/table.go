@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/Query-farm/vgi-go/vgi"
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
@@ -58,6 +59,12 @@ type tableDef struct {
 	// Folders loads the folder map (uid -> title, parent) before the first
 	// page, for folder_path columns.
 	Folders bool
+	// Key lists the primary-key columns of a catalog table. DuckDB reads
+	// only ENFORCED + ALL_ROWS constraints, so a key or foreign key is
+	// declared only where Grafana guarantees it for every returned row.
+	Key []string
+	// FKs reference another table's primary key.
+	FKs []foreignKey
 	// Next fetches the next page into rows (full width, schema order) and
 	// sets s.St.Done when nothing is left.
 	Next func(ctx context.Context, s *scan) ([][]any, error)
@@ -94,6 +101,12 @@ func (d *tableDef) rows(recs []rec, s *scan) [][]any {
 
 // secretNamed is implemented by every argument struct.
 type secretNamed interface{ secret() string }
+
+// foreignKey references another table's primary key.
+type foreignKey struct {
+	Cols  []string
+	Table string
+}
 
 // noArgs is the argument struct of catalog tables.
 type noArgs struct{}
@@ -328,6 +341,7 @@ func catalogTable(def *tableDef) vgi.CatalogTable {
 	tags := withExamples(objectTags(docs{Title: d.Title, Category: d.Category, Keywords: d.Keywords, DocLLM: d.DocLLM, DocMD: d.DocMD}), d.Examples)
 	tags["domain"] = "observability"
 	return vgi.CatalogTable{
+		Constraints:    constraints(def),
 		Name:           def.Name,
 		Comment:        d.Description,
 		Columns:        full,
@@ -383,3 +397,54 @@ func duckType(t arrow.DataType) string {
 
 // errf is fmt.Errorf (kept short for table definitions).
 var errf = fmt.Errorf
+
+// tablesByName indexes allDefs for foreign-key targets.
+func tablesByName() map[string]*tableDef {
+	m := map[string]*tableDef{}
+	for _, d := range allDefs() {
+		m[d.Name] = d
+	}
+	return m
+}
+
+func colPaths(cols []string) [][]string {
+	out := make([][]string, len(cols))
+	for i, c := range cols {
+		out[i] = []string{c}
+	}
+	return out
+}
+
+// constraints builds the table's NOT NULL, primary key and foreign key records.
+func constraints(def *tableDef) [][]byte {
+	rec := func(spec vgi.ConstraintRecordSpec) []byte {
+		spec.SchemaPath, spec.Table = []string{"main"}, def.Name
+		b, err := vgi.ConstraintRecord(spec)
+		if err != nil {
+			panic(fmt.Sprintf("constraint %s.%s: %v", def.Name, spec.ID, err))
+		}
+		return b
+	}
+	var out [][]byte
+	for _, f := range def.Schema().Fields() {
+		if !f.Nullable {
+			out = append(out, rec(vgi.ConstraintRecordSpec{ID: f.Name + "_not_null", Kind: vgi.ConstraintNotNull,
+				Columns: [][]string{{f.Name}}, Enforcement: vgi.ConstraintEnforced, Validation: vgi.ConstraintAllRows}))
+		}
+	}
+	if len(def.Key) > 0 {
+		out = append(out, rec(vgi.ConstraintRecordSpec{ID: "pk", Kind: vgi.ConstraintPrimaryKey, Columns: colPaths(def.Key),
+			Enforcement: vgi.ConstraintEnforced, Validation: vgi.ConstraintAllRows}))
+	}
+	defs := tablesByName()
+	for _, fk := range def.FKs {
+		target, ok := defs[fk.Table]
+		if !ok || len(target.Key) != len(fk.Cols) {
+			panic(fmt.Sprintf("foreign key %s -> %s: no matching primary key", def.Name, fk.Table))
+		}
+		out = append(out, rec(vgi.ConstraintRecordSpec{ID: "fk_" + strings.Join(fk.Cols, "_") + "_" + fk.Table, Kind: vgi.ConstraintForeignKey,
+			Columns: colPaths(fk.Cols), Enforcement: vgi.ConstraintEnforced, Validation: vgi.ConstraintAllRows,
+			References: &vgi.ConstraintReference{SchemaPath: []string{"main"}, Table: fk.Table, Columns: colPaths(target.Key), ConstraintID: "pk"}}))
+	}
+	return out
+}

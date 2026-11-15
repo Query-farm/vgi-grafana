@@ -50,7 +50,7 @@ statement ok
 CREATE SECRET grafana_fixture (TYPE grafana, BASE_URL '{GRAFANA_FIXTURE_URL}', PAGE_SIZE '2');
 
 query TT
-SELECT version, database FROM grafana.main.health;
+SELECT grafana_version, database FROM grafana.main.health;
 ----
 12.1.1	ok
 
@@ -477,19 +477,19 @@ SELECT state, created_by, comment, matchers FROM grafana.main.silences;
 active	alice	db maintenance window	[{'name': team, 'value': db, 'is_regex': false, 'is_equal': true}, {'name': alertname, 'value': Disk.*, 'is_regex': true, 'is_equal': true}]
 
 query TTT
-SELECT rule_uid, previous_state, current_state FROM grafana.main.alert_state_history WHERE rule_uid = 'rule-high-latency' ORDER BY time LIMIT 1;
+SELECT rule_uid, previous_state, current_state FROM grafana.main.alert_state_transitions WHERE rule_uid = 'rule-high-latency' ORDER BY time LIMIT 1;
 ----
 rule-high-latency	Normal	Alerting
 
 query TI
-SELECT rule_uid, count(*) FROM grafana.main.alert_state_history GROUP BY rule_uid ORDER BY rule_uid;
+SELECT rule_uid, count(*) FROM grafana.main.alert_state_transitions GROUP BY rule_uid ORDER BY rule_uid;
 ----
 rule-high-latency	1
 
 # ------------------------------------------------------------------ annotations
 
 query ITTTTTTT
-SELECT id, type, time, time_end, is_region, text, tags, dashboard_uid FROM grafana.main.annotations WHERE type = 'annotation' ORDER BY id;
+SELECT annotation_id, type, time, time_end, is_region, text, tags, dashboard_uid FROM grafana.main.annotations WHERE type = 'annotation' ORDER BY annotation_id;
 ----
 1	annotation	2026-01-01 00:00:00+00	2026-01-01 00:00:00+00	false	Deploy web v1.2.3	[deploy, web]	web-overview
 2	annotation	2026-01-01 02:00:00+00	2026-01-01 02:00:00+00	false	Deploy web v1.2.4	[deploy, web]	web-overview
@@ -500,25 +500,25 @@ SELECT id, type, time, time_end, is_region, text, tags, dashboard_uid FROM grafa
 
 # Time window pushdown (and window splitting at PAGE_SIZE 2).
 query IT
-SELECT id, text FROM grafana.main.annotations WHERE time >= TIMESTAMPTZ '2026-01-01 01:00:00+00' AND time < TIMESTAMPTZ '2026-01-01 04:00:00+00' ORDER BY time, id;
+SELECT annotation_id, text FROM grafana.main.annotations WHERE time >= TIMESTAMPTZ '2026-01-01 01:00:00+00' AND time < TIMESTAMPTZ '2026-01-01 04:00:00+00' ORDER BY time, annotation_id;
 ----
 4	Database maintenance
 2	Deploy web v1.2.4
 3	Incident: elevated 5xx
 
 query IT
-SELECT id, text FROM grafana.main.annotations WHERE time BETWEEN TIMESTAMPTZ '2026-01-01 02:00:00+00' AND TIMESTAMPTZ '2026-01-01 02:00:00+00';
+SELECT annotation_id, text FROM grafana.main.annotations WHERE time BETWEEN TIMESTAMPTZ '2026-01-01 02:00:00+00' AND TIMESTAMPTZ '2026-01-01 02:00:00+00';
 ----
 2	Deploy web v1.2.4
 
 query IT
-SELECT id, text FROM grafana.main.annotations WHERE list_contains(tags, 'deploy') ORDER BY id;
+SELECT annotation_id, text FROM grafana.main.annotations WHERE list_contains(tags, 'deploy') ORDER BY annotation_id;
 ----
 1	Deploy web v1.2.3
 2	Deploy web v1.2.4
 
 query II
-SELECT id, panel_id FROM grafana.main.annotations WHERE dashboard_uid = 'web-overview' AND panel_id = 4;
+SELECT annotation_id, panel_id FROM grafana.main.annotations WHERE dashboard_uid = 'web-overview' AND panel_id = 4;
 ----
 3	4
 
@@ -589,6 +589,34 @@ SELECT ts::VARCHAR, value::VARCHAR FROM grafana.main.ds_query('entities', '{"exp
 2026-01-01 00:00:03+00	-inf
 2026-01-01 00:00:04+00	NULL
 
+# ------------------------------------------------------------------ offline scalars
+
+query TR
+SELECT d, grafana.main.duration_seconds(d) FROM (VALUES ('1h30m'), ('5m'), ('250ms'), ('7d'), ('0s'), ('soon'), (NULL)) t(d) ORDER BY d NULLS LAST;
+----
+0s	0.0
+1h30m	5400.0
+250ms	0.25
+5m	300.0
+7d	604800.0
+soon	NULL
+NULL	NULL
+
+query TR
+SELECT id, grafana.main.duration_seconds(refresh) FROM grafana.main.dashboards WHERE refresh IS NOT NULL ORDER BY id;
+----
+svc-health	60.0
+web-overview	30.0
+
+query T
+SELECT grafana.main.redact_url(u) FROM (VALUES ('https://bot:s3cret@hooks.example.com/services/T0?token=abc'), ('http://prometheus:9090/api#x'), ('warehouse:5432'), (NULL)) t(u) ORDER BY 1 NULLS LAST;
+----
+http://prometheus:9090/api
+https://hooks.example.com/services/T0
+warehouse:5432
+NULL
+
+
 # ------------------------------------------------------------------ auth, org header, named secrets
 
 # The auth fixture demands a credential and X-Grafana-Org-Id: 1.
@@ -646,7 +674,7 @@ SELECT folder_path, count(*) FROM g2.main.dashboards GROUP BY folder_path ORDER 
 /Sales/EMEA	1
 
 query T
-SELECT version FROM g2.main.health;
+SELECT grafana_version FROM g2.main.health;
 ----
 12.1.1
 

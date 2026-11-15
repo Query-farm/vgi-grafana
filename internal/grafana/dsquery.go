@@ -100,19 +100,19 @@ var dsQueryDef = &tableDef{
 		Category: "query",
 		Keywords: "ds_query, data source query, /api/ds/query, data frames, prometheus, loki, sql, testdata, time series, proxy",
 		Description: "Run a read-only query against any Grafana data source through Grafana's query API and get the data frames " +
-			"back as long rows (labels MAP, ts, value)",
+			"back as long rows (labels, ts, value)",
 		DocLLM: "ds_query(datasource_uid, query_json, start_time, end_time, max_data_points := ..., interval_ms := ..., secret_name := ...) " +
 			"POSTs /api/ds/query with the given query model(s) and time range, through Grafana, so any configured data source (Prometheus, " +
 			"Loki, PostgreSQL, Elasticsearch, CloudWatch, TestData, ...) is queryable with the credential's permissions. query_json is the " +
 			"data source's own query model as Grafana stores it in a panel target, e.g. '{\"expr\": \"up\"}' for Prometheus, " +
-			"'{\"rawSql\": \"SELECT ...\", \"format\": \"table\"}' for SQL, '{\"scenarioId\": \"csv_metric_values\", \"stringInput\": \"1,2,3\"}' " +
+			"'{\"rawSql\": \"<the SQL text>\", \"format\": \"table\"}' for SQL data sources, '{\"scenarioId\": \"csv_metric_values\", \"stringInput\": \"1,2,3\"}' " +
 			"for TestData; an array runs several queries (refId defaults to A, B, ...). Copy one from grafana.main.panel_queries.target_json. " +
 			"Output is long: one row per (frame row, non-time field): ref_id, frame_index, frame_name, frame_type, field, labels " +
-			"MAP(VARCHAR, VARCHAR) (the field's labels, e.g. Prometheus series labels), row_index, ts (the frame's first time field; NULL " +
-			"for table frames), value DOUBLE (numbers; booleans as 1/0; NaN/Inf kept), string_value (strings, booleans, extra time fields), unit. " +
+			"`MAP(VARCHAR, VARCHAR)` (the field's labels, e.g. Prometheus series labels), row_index, ts (the frame's first time field; NULL " +
+			"for table frames), value `DOUBLE` (numbers; booleans as 1/0; NaN/Inf kept), string_value (strings, booleans, extra time fields), unit. " +
 			"Pivot table frames with PIVOT or by grouping on row_index. A data source error fails the query with its refId and message.",
 		DocMD: "## ds_query(datasource_uid, query_json, start_time, end_time)\n\nAny Grafana data source, queried through Grafana " +
-			"(`POST /api/ds/query`), as long rows: `labels` MAP, `ts`, `value`, `string_value`. Read-only: queries run, nothing is saved.",
+			"(`POST /api/ds/query`), as long rows: `labels` (`MAP`), `ts`, `value`, `string_value`. Read-only: queries run, nothing is saved.",
 		Examples: []vgi.CatalogExample{
 			{SQL: "SELECT ts, value FROM grafana.main.ds_query('testdata', '{\"scenarioId\": \"csv_metric_values\", \"stringInput\": \"1,20,90\", \"alias\": \"cpu\"}', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-01 01:00:00+00') ORDER BY ts",
 				Description: "A TestData series: three values spread over the hour"},

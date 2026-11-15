@@ -27,16 +27,21 @@ func allDefs() []*tableDef {
 		dashboardsDef, foldersDef, panelsDef, panelQueriesDef, dashboardVersionsDef, libraryPanelsDef, connectionsDef, searchDef,
 		usersDef, teamsDef, teamMembersDef, serviceAccountsDef, orgsDef, healthDef,
 		alertRulesDef, alertRuleQueriesDef, ruleGroupsDef, alertRuleStatesDef, contactPointsDef, notificationPoliciesDef,
-		muteTimingsDef, alertsDef, silencesDef, alertStateHistoryDef,
+		muteTimingsDef, alertsDef, silencesDef, alertStateTransitionsDef,
 		annotationsDef, dsQueryDef,
 	}
 }
 
 // allExamples lists every object's examples for the schema-level tag.
 func allExamples() []exampleQuery {
+	// One example per object keeps the schema tag within agent tool limits;
+	// every example stays on its own object.
 	var lists [][]vgi.CatalogExample
 	for _, d := range allDefs() {
-		lists = append(lists, d.Docs.Examples)
+		lists = append(lists, d.Docs.Examples[:1])
+	}
+	for _, f := range toolScalars() {
+		lists = append(lists, f.examples[:1])
 	}
 	return exampleQueries(lists...)
 }
@@ -65,6 +70,7 @@ func NewWorker(opts ...vgi.WorkerOption) *vgi.Worker {
 	}
 	w := vgi.NewWorker(append(base, opts...)...)
 	registerEvaluator()
+	registerTools(w)
 	for _, d := range allDefs() {
 		if d.Catalog {
 			w.RegisterCatalogTable("main", catalogTable(d))

@@ -40,6 +40,7 @@ var SchemaCategories = []category{
 	{Name: "alerting", Title: "Alerting", Description: "Alert rules, rule queries, groups and states, contact points, notification policies, mute timings, alerts, silences and state history."},
 	{Name: "annotations", Title: "Annotations", Description: "Events and time regions on dashboards and the organization, with time-window pushdown."},
 	{Name: "query", Title: "Data Source Queries", Description: "Run read-only queries against any Grafana data source through /api/ds/query."},
+	{Name: "tools", Title: "Offline Tools", Description: "Scalars that need no server: duration parsing and URL redaction."},
 }
 
 // mustJSON marshals v, panicking on failure (only static data is passed).
@@ -131,11 +132,11 @@ const catalogDocLLM = "Read Grafana (OSS, Enterprise or Grafana Cloud) from SQL 
 	"for basic auth; optional ORG_ID (sent as X-Grafana-Org-Id) and PAGE_SIZE. ATTACH option secret_name picks a named secret for every " +
 	"table; table functions also take secret_name :=. Catalog tables (no parentheses): dashboards, folders, users, connections (data " +
 	"sources) in the shared BI shape (tool, id, title, folder_path, owner, created_at, updated_at, last_viewed_at, view_count, url) that " +
-	"UNION ALL BY NAME with vgi-looker / vgi-metabase / vgi-tableau; panels and panel_queries (every panel and query, flattened), " +
+	"`UNION ALL BY NAME` with vgi-looker / vgi-metabase / vgi-tableau; panels and panel_queries (every panel and query, flattened), " +
 	"dashboard_versions, library_panels; orgs, teams, team_members, service_accounts, health; alerting: alert_rules, alert_rule_queries, " +
-	"rule_groups, alert_rule_states, contact_points, notification_policies, mute_timings, alerts, silences, alert_state_history; and " +
+	"rule_groups, alert_rule_states, contact_points, notification_policies, mute_timings, alerts, silences, alert_state_transitions; and " +
 	"annotations. Table functions: search(query :=, tags :=, type :=, folder_uids :=, starred :=) and ds_query(datasource_uid, query_json, " +
-	"start_time, end_time), which runs any data source query through Grafana and returns long rows (labels MAP, ts, value). WHERE filters " +
+	"start_time, end_time), which runs any data source query through Grafana and returns long rows (labels `MAP`, ts, value); scalars duration_seconds and redact_url need no server. WHERE filters " +
 	"on uids, folders, tags, time and type are pushed into API parameters and re-checked exactly. Secrets never leave Grafana: data " +
 	"source passwords, secure fields, URL credentials, contact point settings and service account tokens are not returned."
 
@@ -155,23 +156,21 @@ const catalogDocMDLong = "# Grafana in DuckDB\n\n" +
 	"- **ds_query**: any data source query through Grafana's `/api/ds/query`, as long rows.\n\n" +
 	"Credentials come from a `grafana` DuckDB secret; secrets stored in Grafana are never returned."
 
-const schemaDocLLM = "The main schema holds every table. Catalog tables are read without parentheses (SELECT ... FROM " +
-	"grafana.main.dashboards); search(...) and ds_query(...) are table functions. Shared BI columns: tool ('grafana'), id, title, " +
-	"folder_path ('/Parent/Child', '/' = General), owner, created_at, updated_at, last_viewed_at and view_count (NULL on OSS), url. " +
-	"Join keys: dashboards.id = panels.dashboard_uid = panel_queries.dashboard_uid = dashboard_versions.dashboard_uid = " +
-	"annotations.dashboard_uid; connections.id = panels.datasource_uid; folders.id = dashboards.folder_uid; alert_rules.uid = " +
-	"alert_rule_queries.rule_uid = alert_rule_states.rule_uid = alerts.rule_uid; users.user_id = team_members.user_id; " +
-	"contact_points.name = notification_policies.receiver. Filters on dashboard_uid, rule_uid and team_id limit fan-out tables " +
-	"(panels, panel_queries, dashboard_versions, alert_state_history, team_members) to those keys."
+const schemaDocLLM = "The main schema mirrors one Grafana organization through its HTTP API. Most objects are catalog tables, " +
+	"read without parentheses and re-fetched on every query; two are table functions (Grafana search and data source queries) " +
+	"and two are offline scalars. Inventory tables share the BI vocabulary of the Looker, Tableau and Metabase workers: tool " +
+	"('grafana'), id, title, folder_path ('/Parent/Child', '/' = General), owner, created_at, updated_at, last_viewed_at and " +
+	"view_count (NULL on OSS), url. Grafana objects are keyed by UID: dashboard_uid, rule_uid, datasource_uid and folder_uid columns " +
+	"join to the id / uid of the owning table. Fan-out tables (one request per dashboard, rule or team) read only the keys pinned " +
+	"by an equality or IN filter on that key. Equality, IN, list_contains on tags and time ranges become API parameters; every " +
+	"filter is re-checked exactly in the worker. Every object is read-only and nothing stored as a secret in Grafana is returned."
 
 // SchemaDocMD is the main schema's human-facing description (also its comment).
 const SchemaDocMD = "## main\n\n" +
-	"Every Grafana table and function. Catalog tables read the API on each query; filters on keys, folders, tags and time " +
-	"are sent to Grafana so only what you ask for is fetched.\n\n" +
-	"- **Inventory**: `dashboards`, `folders`, `panels`, `panel_queries`, `connections`, `library_panels`.\n" +
-	"- **Audit**: `dashboard_versions`, `users`, `teams`, `team_members`, `service_accounts`.\n" +
-	"- **Alerting**: `alert_rules`, `alert_rule_states`, `alerts`, `silences`, `notification_policies`.\n" +
-	"- **Query**: `ds_query(...)` runs any data source query through Grafana."
+	"One Grafana organization as SQL: content inventory, access, alerting, annotations and data source queries.\n\n" +
+	"Tables read the API on each query. Filters on keys, folders, tags and time are sent to Grafana so only what you ask " +
+	"for is fetched, and every filter is re-checked exactly.\n\n" +
+	"The BI inventory columns line up with the Looker, Tableau and Metabase workers for cross-tool reports."
 
 // agentTask is one public analyst task for `vgi-lint simulate`.
 type agentTask struct {
@@ -200,6 +199,17 @@ var agentTestTasks = []agentTask{
 	{Name: "deploy_annotations", Prompt: "List the deploy annotations on 2026-01-01 in time order."},
 	{Name: "testdata_query", Prompt: "Using Grafana's TestData data source, run the csv_metric_values scenario with values 1,20,90 between 2026-01-01 00:00 and 01:00 UTC and return the time and value of each point."},
 	{Name: "server_version", Prompt: "Which Grafana version is the server running?"},
+	{Name: "rules_per_folder", Prompt: "How many Grafana alert rules are in each rule group, and which are paused?"},
+	{Name: "rule_transitions", Prompt: "List the state transitions of the Grafana alert rule 'rule-high-latency' with previous and new state."},
+	{Name: "alert_instances", Prompt: "Which Grafana alert instances are active, and which contact points receive them?"},
+	{Name: "weekend_mute", Prompt: "Which Grafana mute timings exist and on which weekdays do they apply?"},
+	{Name: "organizations", Prompt: "Which Grafana organizations exist?"},
+	{Name: "group_intervals", Prompt: "How often is each Grafana alert rule group evaluated, in seconds?"},
+	{Name: "search_web", Prompt: "Using Grafana's search, find every dashboard and folder whose title contains 'web'."},
+	{Name: "service_account_tokens", Prompt: "Which Grafana service accounts exist, with their role and number of tokens?"},
+	{Name: "team_sizes", Prompt: "How many members does each Grafana team have?"},
+	{Name: "redacted_endpoints", Prompt: "Using the grafana worker, strip credentials and query strings from the URL 'https://bot:s3cret@hooks.example.com/services/T0?token=abc'."},
+	{Name: "refresh_seconds", Prompt: "Which Grafana dashboards auto-refresh, and how often in seconds?"},
 }
 
 // CatalogTags are the catalog-level discovery tags.

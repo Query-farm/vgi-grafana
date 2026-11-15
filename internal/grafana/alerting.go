@@ -77,8 +77,10 @@ var alertRulesDef = &tableDef{
 	Name:    "alert_rules",
 	Catalog: true,
 	Folders: true,
+	Key:     []string{"uid"},
+	FKs:     []foreignKey{{Cols: []string{"org_id"}, Table: "orgs"}},
 	Docs: fnDocs{
-		Title:    "Alert Rules",
+		Title:    "Alert Rule Definitions",
 		Category: "alerting",
 		Keywords: "alert rules, alerting, conditions, labels, annotations, for, no data, paused, provisioning",
 		Description: "Grafana-managed alert rules with folder, rule group, condition, pending period, no-data and error handling, " +
@@ -131,7 +133,7 @@ var alertRulesDef = &tableDef{
 		cBool("is_recording", "A recording rule (writes a metric instead of alerting).", "_recording"),
 		cStr("provenance", "Where the rule is managed: 'file', 'api' or NULL (UI).", "provenance"),
 		cTS("updated_at", "Last update time.", "updated"),
-		cInt("org_id", "Organization id.", "orgID"),
+		cInt("org_id", "Numeric organization identifier (joins orgs.org_id).", "orgID"),
 		cFn("url", tString, "Link to the rule in the Grafana UI.", func(r rec, s *scan) any {
 			if uid := strOrEmpty(r, "uid"); uid != "" {
 				return webURL(s.C, "/alerting/grafana/"+url.PathEscape(uid)+"/view")
@@ -155,8 +157,10 @@ var alertRulesDef = &tableDef{
 var alertRuleQueriesDef = &tableDef{
 	Name:    "alert_rule_queries",
 	Catalog: true,
+	Key:     []string{"rule_uid", "ref_id"},
+	FKs:     []foreignKey{{Cols: []string{"rule_uid"}, Table: "alert_rules"}},
 	Docs: fnDocs{
-		Title:       "Alert Rule Queries",
+		Title:       "Queries Behind Alert Rules",
 		Category:    "alerting",
 		Keywords:    "alert queries, expressions, reduce, threshold, math, datasource, promql, relative time range",
 		Description: "The queries and server-side expressions of every alert rule, one row each",
@@ -176,8 +180,8 @@ var alertRuleQueriesDef = &tableDef{
 	Cols: []col{
 		cTool(),
 		cKey("rule_uid", "Rule UID (joins alert_rules.uid).", "_rule", "uid"),
-		cStr("rule_title", "Rule title.", "_rule", "title"),
-		cStr("ref_id", "Query reference id.", "q", "refId"),
+		cStr("rule_title", "Title of the alert rule the query belongs to.", "_rule", "title"),
+		cKey("ref_id", "Query or expression reference letter within the rule (A, B, ...).", "q", "refId"),
 		cStr("datasource_uid", "Data source UID ('__expr__' for an expression).", "q", "datasourceUid"),
 		cFn("is_expression", tBool, "A server-side expression rather than a data source query.", func(r rec, _ *scan) any {
 			u := strOrEmpty(r, "q", "datasourceUid")
@@ -240,6 +244,7 @@ var ruleGroupsDef = &tableDef{
 	Name:    "rule_groups",
 	Catalog: true,
 	Folders: true,
+	Key:     []string{"folder_uid", "name"},
 	Docs: fnDocs{
 		Title:       "Alert Rule Groups",
 		Category:    "alerting",
@@ -256,7 +261,7 @@ var ruleGroupsDef = &tableDef{
 	Cols: []col{
 		cTool(),
 		cKey("name", "Group name.", "name"),
-		cStr("folder_uid", "UID of the group's folder.", "folderUid"),
+		cKey("folder_uid", "UID of the group's folder.", "folderUid"),
 		cFolderPath("Folder chain of the group.", "folderUid"),
 		cStr("folder_title", "Folder title (the 'file' field).", "file"),
 		cFloat("interval_seconds", "Evaluation interval in seconds.", "interval"),
@@ -264,8 +269,8 @@ var ruleGroupsDef = &tableDef{
 			rules, _ := r["rules"].([]any)
 			return int64(len(rules))
 		}),
-		cFn("firing", tInt64, "Rules currently firing.", func(r rec, _ *scan) any { return countState(r, "firing") }),
-		cFn("pending", tInt64, "Rules currently pending.", func(r rec, _ *scan) any { return countState(r, "pending") }),
+		cFn("firing", tInt64, "Count of rules currently firing.", func(r rec, _ *scan) any { return countState(r, "firing") }),
+		cFn("pending", tInt64, "Count of rules currently pending.", func(r rec, _ *scan) any { return countState(r, "pending") }),
 		cTS("last_evaluation", "Last evaluation time of the group.", "lastEvaluation"),
 		cFloat("evaluation_seconds", "Duration of the last evaluation in seconds.", "evaluationTime"),
 	},
@@ -293,8 +298,10 @@ func countState(g rec, state string) any {
 var alertRuleStatesDef = &tableDef{
 	Name:    "alert_rule_states",
 	Catalog: true,
+	Key:     []string{"rule_uid"},
+	FKs:     []foreignKey{{Cols: []string{"rule_uid"}, Table: "alert_rules"}},
 	Docs: fnDocs{
-		Title:       "Alert Rule States",
+		Title:       "Live Rule States",
 		Category:    "alerting",
 		Keywords:    "rule state, firing, pending, inactive, health, last evaluation, evaluation errors",
 		Description: "Evaluation state of every alert rule: firing, pending, recovering or inactive, health, last error and timings",
@@ -358,7 +365,7 @@ var contactPointsDef = &tableDef{
 	Name:    "contact_points",
 	Catalog: true,
 	Docs: fnDocs{
-		Title:       "Contact Points",
+		Title:       "Notification Contact Points",
 		Category:    "alerting",
 		Keywords:    "contact points, receivers, integrations, slack, pagerduty, email, webhook, notifications",
 		Description: "Notification contact points: name, integration type and target host only; settings, secrets and full URLs are never returned",
@@ -481,14 +488,16 @@ func flattenRoutes(node rec, pathStr string, depth int64, parent rec, out *[]rec
 var notificationPoliciesDef = &tableDef{
 	Name:    "notification_policies",
 	Catalog: true,
+	Key:     []string{"path"},
+	FKs:     []foreignKey{{Cols: []string{"parent_path"}, Table: "notification_policies"}},
 	Docs: fnDocs{
-		Title:       "Notification Policies",
+		Title:       "Notification Routing Tree",
 		Category:    "alerting",
 		Keywords:    "notification policies, routing tree, routes, matchers, receivers, group by, mute timings",
 		Description: "The notification policy tree flattened: one row per route with its matchers, receiver and timings (inherited values resolved)",
 		DocLLM: "One row per route of the notification policy tree (GET /api/v1/provisioning/policies), depth first. path is '0' for the " +
 			"root (default policy), '0.1' for its second child, etc.; parent_path and depth place it in the tree. matchers is a list of " +
-			"STRUCT(name, op, value) with op one of =, !=, =~, !~. receiver, group_by and the *_seconds timings are effective values " +
+			"`STRUCT(name, op, value)` with op one of =, !=, =~, !~. receiver, group_by and the *_seconds timings are effective values " +
 			"(inherited from the parent when the route does not set them). continue_matching is the route's 'continue' flag. " +
 			"mute_timings / active_timings name mute_timings rows.",
 		DocMD: "## notification_policies\n\nThe routing tree as rows, inherited settings resolved.",
@@ -502,7 +511,7 @@ var notificationPoliciesDef = &tableDef{
 		cTool(),
 		cKey("path", "Position in the tree: '0' = root, '0.1' = the root's second child.", "path"),
 		cStr("parent_path", "Path of the parent route; NULL for the root.", "parent"),
-		cInt("depth", "Depth: 0 for the root (default policy).", "depth"),
+		cInt("depth", "Depth in levels below the root: 0 for the root (default policy).", "depth"),
 		cFn("is_default", tBool, "The root (default) policy.", func(r rec, _ *scan) any { return r["path"] == "0" }),
 		cStr("receiver", "Effective contact point name (joins contact_points.name).", "eff", "receiver"),
 		cFn("matchers", arrow.ListOf(matcherType), "Label matchers: list of STRUCT(name, op, value), op one of =, !=, =~, !~.", func(r rec, _ *scan) any {
@@ -535,8 +544,9 @@ var notificationPoliciesDef = &tableDef{
 var muteTimingsDef = &tableDef{
 	Name:    "mute_timings",
 	Catalog: true,
+	Key:     []string{"name"},
 	Docs: fnDocs{
-		Title:       "Mute Timings",
+		Title:       "Mute Timing Windows",
 		Category:    "alerting",
 		Keywords:    "mute timings, time intervals, maintenance windows, schedules",
 		Description: "Mute timings (named time intervals during which notifications are muted)",
@@ -551,7 +561,7 @@ var muteTimingsDef = &tableDef{
 	Cols: []col{
 		cTool(),
 		cKey("name", "Mute timing name.", "name"),
-		cFn("interval_count", tInt64, "Number of time intervals.", func(r rec, _ *scan) any {
+		cFn("interval_count", tInt64, "Count of time intervals.", func(r rec, _ *scan) any {
 			ti, _ := r["time_intervals"].([]any)
 			return int64(len(ti))
 		}),
@@ -568,7 +578,7 @@ var muteTimingsDef = &tableDef{
 			return out
 		}),
 		cJSON("time_intervals", "The intervals as JSON (times, weekdays, days_of_month, months, years, location).", "time_intervals"),
-		cStr("version", "Version (etag) of the mute timing.", "version"),
+		cStr("etag", "Version tag of the mute timing (changes on every edit).", "version"),
 		cStr("provenance", "Where it is managed: 'file', 'api' or NULL (UI).", "provenance"),
 	},
 	Next: func(ctx context.Context, s *scan) ([][]any, error) {
@@ -586,6 +596,7 @@ var muteTimingsDef = &tableDef{
 var alertsDef = &tableDef{
 	Name:    "alerts",
 	Catalog: true,
+	Key:     []string{"fingerprint"},
 	Docs: fnDocs{
 		Title:       "Alert Instances",
 		Category:    "alerting",
@@ -650,13 +661,14 @@ var silenceMatcherType = arrow.StructOf(
 var silencesDef = &tableDef{
 	Name:    "silences",
 	Catalog: true,
+	Key:     []string{"id"},
 	Docs: fnDocs{
-		Title:       "Silences",
+		Title:       "Alertmanager Silences",
 		Category:    "alerting",
 		Keywords:    "silences, mute, maintenance, alertmanager, matchers",
 		Description: "Alertmanager silences: matchers, author, comment, time window and state",
 		DocLLM: "One row per silence in Grafana's Alertmanager (GET /api/alertmanager/grafana/api/v2/silences), expired ones included. " +
-			"state is active, pending or expired. matchers is a list of STRUCT(name, value, is_regex, is_equal). id joins alerts.silenced_by.",
+			"state is active, pending or expired. matchers is a list of `STRUCT(name, value, is_regex, is_equal)`. id joins alerts.silenced_by.",
 		DocMD: "## silences\n\nWho silenced what, until when.",
 		Examples: []vgi.CatalogExample{
 			{SQL: "SELECT created_by, comment, ends_at FROM grafana.main.silences WHERE state = 'active' ORDER BY ends_at",
@@ -682,7 +694,7 @@ var silencesDef = &tableDef{
 			return out
 		}),
 		cStr("created_by", "Author.", "createdBy"),
-		cStr("comment", "Comment.", "comment"),
+		cStr("comment", "Why the silence was created, as written by its author.", "comment"),
 		cTS("starts_at", "Start of the silence.", "startsAt"),
 		cTS("ends_at", "End of the silence.", "endsAt"),
 		cTS("updated_at", "Last update.", "updatedAt"),
@@ -699,11 +711,12 @@ var silencesDef = &tableDef{
 
 // ---- alert state history ----------------------------------------------------------
 
-var alertStateHistoryDef = &tableDef{
-	Name:    "alert_state_history",
+var alertStateTransitionsDef = &tableDef{
+	Name:    "alert_state_transitions",
 	Catalog: true,
+	FKs:     []foreignKey{{Cols: []string{"rule_uid"}, Table: "alert_rules"}},
 	Docs: fnDocs{
-		Title:       "Alert State History",
+		Title:       "Rule State Changes",
 		Category:    "alerting",
 		Keywords:    "state history, transitions, alert timeline, normal, alerting, pending, flapping",
 		Description: "State transitions of alert rules (Normal -> Pending -> Alerting, ...) from Grafana's state history",
@@ -712,11 +725,11 @@ var alertStateHistoryDef = &tableDef{
 			"read (one request each). time >= / > / < / <= / BETWEEN are pushed as the from/to window. previous_state / current_state are " +
 			"Normal, Pending, Alerting, NoData, Error or Recovering (with a reason suffix such as 'Normal (MissingSeries)'). values is the " +
 			"evaluation values JSON ({\"B\": 270, \"C\": 1}).",
-		DocMD: "## alert_state_history\n\nAlert rule state transitions over time.",
+		DocMD: "## alert_state_transitions\n\nAlert rule state transitions over time.",
 		Examples: []vgi.CatalogExample{
-			{SQL: "SELECT rule_uid, count(*) AS transitions FROM grafana.main.alert_state_history WHERE current_state LIKE 'Alerting%' GROUP BY rule_uid ORDER BY transitions DESC, rule_uid",
+			{SQL: "SELECT rule_uid, count(*) AS transitions FROM grafana.main.alert_state_transitions WHERE current_state LIKE 'Alerting%' GROUP BY rule_uid ORDER BY transitions DESC, rule_uid",
 				Description: "Which rules fired most often"},
-			{SQL: "SELECT time, previous_state, current_state FROM grafana.main.alert_state_history WHERE rule_uid = 'rule-high-latency' ORDER BY time",
+			{SQL: "SELECT time, previous_state, current_state FROM grafana.main.alert_state_transitions WHERE rule_uid = 'rule-high-latency' ORDER BY time",
 				Description: "One rule's timeline (only that rule is read)"},
 		},
 	},

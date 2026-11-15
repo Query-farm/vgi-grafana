@@ -84,6 +84,7 @@ var dashboardsDef = &tableDef{
 	Name:    "dashboards",
 	Catalog: true,
 	Folders: true,
+	Key:     []string{"id"},
 	Docs: fnDocs{
 		Title:    "Grafana Dashboards",
 		Category: "content",
@@ -94,7 +95,7 @@ var dashboardsDef = &tableDef{
 			"column is selected: owner, updated_by, created_at, updated_at, version, schema_version, panel_count, refresh, time_from, time_to, " +
 			"description, provisioned, dashboard_json). id is the dashboard UID. folder_path is the folder chain from the root ('/' = General). " +
 			"last_viewed_at and view_count are NULL on Grafana OSS (no view statistics API). Pushdown: id = / IN -> dashboardUIDs, " +
-			"folder_uid = / IN -> folderUIDs, list_contains(tags, 'x') -> tag, is_starred = true -> starred. Use UNION ALL BY NAME with " +
+			"folder_uid = / IN -> folderUIDs, list_contains(tags, 'x') -> tag, is_starred = true -> starred. Use `UNION ALL BY NAME` with " +
 			"looker.main.dashboards / metabase.main.dashboards for a cross-tool inventory; use grafana.main.panels for panels and queries.",
 		DocMD: "## dashboards\n\nEvery dashboard, one row each, in the shared BI inventory columns plus Grafana specifics. " +
 			"Detail columns cost one extra request per dashboard and are fetched only when selected.",
@@ -121,9 +122,9 @@ var dashboardsDef = &tableDef{
 		cFn("created_at", tTS, "Creation time (detail column).", func(r rec, _ *scan) any { return parseTime(dashDetail(r, "meta", "created")) }),
 		cFn("updated_at", tTS, "Last save time (detail column).", func(r rec, _ *scan) any { return parseTime(dashDetail(r, "meta", "updated")) }),
 		cFn("last_viewed_at", tTS, "Last view time: NULL, Grafana OSS has no view statistics API.", func(rec, *scan) any { return nil }),
-		cFn("view_count", tInt64, "Lifetime views: NULL, Grafana OSS has no view statistics API.", func(rec, *scan) any { return nil }),
+		cFn("view_count", tInt64, "Count of lifetime views: NULL, Grafana OSS has no view statistics API.", func(rec, *scan) any { return nil }),
 		cURL("Link to the dashboard in the Grafana UI.", "url"),
-		cInt("dashboard_id", "Numeric dashboard id (instance-local; prefer id/UID).", "id"),
+		cInt("internal_id", "Numeric dashboard identifier local to this Grafana instance (prefer id, the UID).", "id"),
 		cFn("version", tInt64, "Saved version number (detail column).", func(r rec, _ *scan) any { return i64(r, "_detail", "meta", "version") }),
 		cFn("schema_version", tInt64, "Dashboard JSON schema version (detail column).", func(r rec, _ *scan) any { return i64(r, "_detail", "dashboard", "schemaVersion") }),
 		cFn("panel_count", tInt64, "Number of panels, rows and panels inside collapsed rows included (detail column).", func(r rec, _ *scan) any {
@@ -180,6 +181,7 @@ var foldersDef = &tableDef{
 	Name:    "folders",
 	Catalog: true,
 	Folders: true,
+	Key:     []string{"id"},
 	Docs: fnDocs{
 		Title:       "Grafana Folders",
 		Category:    "content",
@@ -203,7 +205,7 @@ var foldersDef = &tableDef{
 		cFn("folder_path", tString, "Folder chain from the root including this folder, e.g. '/Operations/Web'.", func(r rec, s *scan) any {
 			return folderPath(s.St.Folders, strOrEmpty(r, "uid"))
 		}),
-		cFn("depth", tInt64, "Nesting depth: 1 for a top-level folder.", func(r rec, s *scan) any {
+		cFn("depth", tInt64, "Nesting depth in levels below the root: 1 for a top-level folder.", func(r rec, s *scan) any {
 			p, ok := folderPath(s.St.Folders, strOrEmpty(r, "uid")).(string)
 			if !ok {
 				return nil
@@ -216,7 +218,7 @@ var foldersDef = &tableDef{
 		cFn("updated_at", tTS, "Last change time (detail column).", func(r rec, _ *scan) any { return parseTime(path(r, "_detail", "updated")) }),
 		cFn("version", tInt64, "Folder version (detail column).", func(r rec, _ *scan) any { return i64(r, "_detail", "version") }),
 		cURL("Link to the folder in the Grafana UI.", "url"),
-		cInt("folder_id", "Numeric folder id (instance-local).", "id"),
+		cInt("internal_id", "Numeric folder identifier local to this Grafana instance (prefer id, the UID).", "id"),
 	},
 	Next: func(ctx context.Context, s *scan) ([][]any, error) {
 		p := url.Values{"type": {"dash-folder"}}
@@ -242,8 +244,10 @@ var foldersDef = &tableDef{
 var usersDef = &tableDef{
 	Name:    "users",
 	Catalog: true,
+	Key:     []string{"user_id"},
+	FKs:     []foreignKey{{Cols: []string{"org_id"}, Table: "orgs"}},
 	Docs: fnDocs{
-		Title:       "Grafana Users",
+		Title:       "Organization Users And Roles",
 		Category:    "access",
 		Keywords:    "users, org users, roles, last seen, logins, access review",
 		Description: "Users of the current organization with their org role, last-seen time and disabled flag",
@@ -260,10 +264,10 @@ var usersDef = &tableDef{
 	Cols: []col{
 		cTool(),
 		cKey("id", "Numeric user id, as text (shared BI shape).", "userId"),
-		cInt("user_id", "Numeric user id.", "userId"),
+		cIntKey("user_id", "Numeric user identifier (joins team_members.user_id).", "userId"),
 		cStr("uid", "User UID.", "uid"),
 		cStr("login", "Login name.", "login"),
-		cStr("display_name", "Display name.", "name"),
+		cStr("display_name", "Full name shown in the Grafana UI; NULL when unset.", "name"),
 		cStr("email", "Email address.", "email"),
 		cStr("role", "Org role: Admin, Editor, Viewer or None.", "role"),
 		cFn("last_seen_at", tTS, "Last activity time; NULL when the user never signed in (Grafana reports those as 10 years ago).", func(r rec, _ *scan) any {
@@ -275,7 +279,7 @@ var usersDef = &tableDef{
 		cBool("is_disabled", "The account is disabled.", "isDisabled"),
 		cList("auth_labels", "External auth providers the user signed in with (e.g. 'OAuth', 'LDAP').", "authLabels"),
 		cBool("is_externally_synced", "Role managed by an external identity provider.", "isExternallySynced"),
-		cInt("org_id", "Organization id.", "orgId"),
+		cInt("org_id", "Numeric organization identifier (joins orgs.org_id).", "orgId"),
 		cFn("url", tString, "Link to the user's admin page in the Grafana UI.", func(r rec, s *scan) any {
 			if uid := strOrEmpty(r, "uid"); uid != "" {
 				return webURL(s.C, "/admin/users/edit/"+url.PathEscape(uid))
@@ -340,6 +344,8 @@ func maskJSON(v any) any {
 var connectionsDef = &tableDef{
 	Name:    "connections",
 	Catalog: true,
+	Key:     []string{"id"},
+	FKs:     []foreignKey{{Cols: []string{"org_id"}, Table: "orgs"}},
 	Docs: fnDocs{
 		Title:    "Grafana Data Sources",
 		Category: "content",
@@ -371,7 +377,7 @@ var connectionsDef = &tableDef{
 			}
 			return nil
 		}),
-		cInt("datasource_id", "Numeric data source id (instance-local).", "id"),
+		cInt("internal_id", "Numeric data source identifier local to this Grafana instance (prefer id, the UID).", "id"),
 		cStr("type", "Plugin id, e.g. 'prometheus', 'loki', 'grafana-postgresql-datasource'.", "type"),
 		cStr("type_name", "Plugin display name, e.g. 'PostgreSQL'.", "typeName"),
 		cStr("access", "Access mode: 'proxy' (server) or 'direct' (browser).", "access"),
@@ -395,7 +401,7 @@ var connectionsDef = &tableDef{
 			}
 			return jsonOf(rec{"v": maskJSON(v)}, "v")
 		}),
-		cInt("org_id", "Organization id.", "orgId"),
+		cInt("org_id", "Numeric organization identifier (joins orgs.org_id).", "orgId"),
 	},
 	Next: func(ctx context.Context, s *scan) ([][]any, error) {
 		var list []rec
@@ -440,7 +446,7 @@ var searchDef = &tableDef{
 		Keywords:    "search, find dashboards, query, tags, starred, folders",
 		Description: "Grafana's dashboard and folder search, with its query, tag, type, folder and starred filters as arguments",
 		DocLLM: "Run Grafana's search (GET /api/search). Named args: query (title substring), tags (comma-separated, all must match), " +
-			"type ('dashboard' or 'folder'), folder_uids (comma-separated), starred (BOOLEAN), secret_name. Columns: kind ('dashboard' | 'folder'), " +
+			"type ('dashboard' or 'folder'), folder_uids (comma-separated), starred (`BOOLEAN`), secret_name. Columns: kind ('dashboard' | 'folder'), " +
 			"uid, title, folder_uid, folder_title, folder_path, tags, is_starred, url, id. WHERE kind / uid / folder_uid / is_starred / " +
 			"list_contains(tags, 'x') are pushed into the same parameters. Use grafana.main.dashboards for the full inventory with owners and dates.",
 		DocMD: "## search(query := ..., tags := ..., type := ..., folder_uids := ..., starred := ...)\n\nGrafana's search box as a table.",
@@ -469,7 +475,7 @@ var searchDef = &tableDef{
 		cList("tags", "Tags (dashboards only).", "tags"),
 		cBool("is_starred", "Starred by the credential's user.", "isStarred"),
 		cURL("Link in the Grafana UI.", "url"),
-		cInt("id", "Numeric id (instance-local).", "id"),
+		cInt("internal_id", "Numeric identifier local to this Grafana instance (prefer uid).", "id"),
 	},
 	Next: func(ctx context.Context, s *scan) ([][]any, error) {
 		var a searchArgs

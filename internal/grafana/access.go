@@ -15,6 +15,7 @@ import (
 var orgsDef = &tableDef{
 	Name:    "orgs",
 	Catalog: true,
+	Key:     []string{"org_id"},
 	Docs: fnDocs{
 		Title:       "Organizations",
 		Category:    "access",
@@ -30,7 +31,7 @@ var orgsDef = &tableDef{
 	},
 	Cols: []col{
 		cTool(),
-		cInt("org_id", "Organization id (the secret's ORG_ID).", "id"),
+		cIntKey("org_id", "Numeric organization identifier (the secret's ORG_ID).", "id"),
 		cStr("name", "Organization name.", "name"),
 		cFn("is_current", tBool, "Listed through /api/org because the credential cannot list every org.", func(r rec, _ *scan) any {
 			b, _ := r["_current"].(bool)
@@ -91,8 +92,10 @@ func containsStr(xs []string, x string) bool {
 var teamsDef = &tableDef{
 	Name:    "teams",
 	Catalog: true,
+	Key:     []string{"team_id"},
+	FKs:     []foreignKey{{Cols: []string{"org_id"}, Table: "orgs"}},
 	Docs: fnDocs{
-		Title:       "Teams",
+		Title:       "Teams And Their Sizes",
 		Category:    "access",
 		Keywords:    "teams, groups, members, access",
 		Description: "Teams of the current organization with their member counts",
@@ -104,13 +107,13 @@ var teamsDef = &tableDef{
 	},
 	Cols: []col{
 		cTool(),
-		cInt("team_id", "Numeric team id.", "id"),
+		cIntKey("team_id", "Numeric team identifier (joins team_members.team_id).", "id"),
 		cStr("uid", "Team UID.", "uid"),
 		cStr("name", "Team name.", "name"),
 		cStr("email", "Team email.", "email"),
-		cInt("member_count", "Number of members.", "memberCount"),
+		cInt("member_count", "Count of team members.", "memberCount"),
 		cBool("is_provisioned", "Provisioned (synced) rather than managed in the UI.", "isProvisioned"),
-		cInt("org_id", "Organization id.", "orgId"),
+		cInt("org_id", "Numeric organization identifier (joins orgs.org_id).", "orgId"),
 		cFn("url", tString, "Link to the team in the Grafana UI.", func(r rec, s *scan) any {
 			if uid := strOrEmpty(r, "uid"); uid != "" {
 				return webURL(s.C, "/org/teams/edit/"+url.PathEscape(uid))
@@ -148,13 +151,16 @@ func teamsPage(ctx context.Context, s *scan, page int) ([]rec, error) {
 var teamMembersDef = &tableDef{
 	Name:    "team_members",
 	Catalog: true,
+	Key:     []string{"team_id", "user_id"},
+	FKs:     []foreignKey{{Cols: []string{"team_id"}, Table: "teams"}, {Cols: []string{"user_id"}, Table: "users"}},
 	Docs: fnDocs{
-		Title:       "Team Members",
+		Title:       "Team Membership",
 		Category:    "access",
 		Keywords:    "team members, membership, users in teams, team admin",
 		Description: "Members of every team, with their login, email and team permission",
 		DocLLM: "One row per (team, member) (GET /api/teams/<id>/members per team). permission is 4 for a team admin, 0 for a member " +
-			"(is_admin = permission 4). Pushdown: team_id = / IN reads only those teams, team_name = 'x' searches by name.",
+			"(is_admin = permission 4). Join users ON users.user_id = team_members.user_id and teams ON teams.team_id = " +
+			"team_members.team_id. Pushdown: team_id = / IN reads only those teams, team_name = 'x' searches by name.",
 		DocMD: "## team_members\n\nTeam membership, one row per member of each team.",
 		Examples: []vgi.CatalogExample{
 			{SQL: "SELECT team_name, login, is_admin FROM grafana.main.team_members ORDER BY team_name, login", Description: "Who is in which team"},
@@ -164,15 +170,15 @@ var teamMembersDef = &tableDef{
 	},
 	Cols: []col{
 		cTool(),
-		cInt("team_id", "Numeric team id (joins teams.team_id).", "teamId"),
-		cStr("team_name", "Team name.", "_team_name"),
-		cStr("team_uid", "Team UID.", "teamUID"),
-		cInt("user_id", "Numeric user id (joins users.user_id).", "userId"),
-		cStr("user_uid", "User UID.", "userUID"),
+		cIntKey("team_id", "Numeric team identifier (joins teams.team_id).", "teamId"),
+		cStr("team_name", "Name of the team the user belongs to.", "_team_name"),
+		cStr("team_uid", "Stable UID of the team (teams.uid).", "teamUID"),
+		cIntKey("user_id", "Numeric user identifier (joins users.user_id).", "userId"),
+		cStr("user_uid", "Stable UID of the member (users.uid).", "userUID"),
 		cStr("login", "Member login.", "login"),
 		cStr("email", "Member email.", "email"),
 		cStr("display_name", "Member display name.", "name"),
-		cInt("permission", "Team permission: 4 = team admin, 0 = member.", "permission"),
+		cInt("permission", "Team permission level (4 = team admin, 0 = member).", "permission"),
 		cFn("is_admin", tBool, "Team admin (permission 4).", func(r rec, _ *scan) any { return intOr(i64(r, "permission")) == 4 }),
 		cStr("auth_module", "Auth module that synced the membership, e.g. 'oauth_github'; NULL for manual membership.", "auth_module"),
 	},
@@ -237,8 +243,10 @@ var teamMembersDef = &tableDef{
 var serviceAccountsDef = &tableDef{
 	Name:    "service_accounts",
 	Catalog: true,
+	Key:     []string{"service_account_id"},
+	FKs:     []foreignKey{{Cols: []string{"org_id"}, Table: "orgs"}},
 	Docs: fnDocs{
-		Title:       "Service Accounts",
+		Title:       "Service Accounts For Automation",
 		Category:    "access",
 		Keywords:    "service accounts, tokens, automation, api keys, machine users",
 		Description: "Service accounts with their role, disabled flag and token count (tokens themselves are never returned)",
@@ -252,14 +260,14 @@ var serviceAccountsDef = &tableDef{
 	},
 	Cols: []col{
 		cTool(),
-		cInt("service_account_id", "Numeric id.", "id"),
+		cIntKey("service_account_id", "Numeric service account identifier (instance-local).", "id"),
 		cStr("uid", "Service account UID.", "uid"),
-		cStr("name", "Name.", "name"),
+		cStr("name", "Service account display name.", "name"),
 		cStr("login", "Login (sa-<org>-<name>).", "login"),
 		cStr("role", "Org role: Admin, Editor, Viewer or None.", "role"),
 		cBool("is_disabled", "Disabled.", "isDisabled"),
-		cInt("token_count", "Number of tokens (their values are never returned).", "tokens"),
-		cInt("org_id", "Organization id.", "orgId"),
+		cInt("token_count", "Count of tokens (their values are never returned).", "tokens"),
+		cInt("org_id", "Numeric organization identifier (joins orgs.org_id).", "orgId"),
 	},
 	Next: func(ctx context.Context, s *scan) ([][]any, error) {
 		p := url.Values{"perpage": {strconv.Itoa(s.C.PageSize)}, "page": {strconv.Itoa(s.St.Page)}}
@@ -285,14 +293,14 @@ var healthDef = &tableDef{
 		Category:    "access",
 		Keywords:    "health, version, build, commit, database status",
 		Description: "Grafana's health endpoint: version, commit and database status",
-		DocLLM:      "One row from GET /api/health: version (e.g. '12.1.1'), commit and database ('ok' when the backing database answers). Needs no permission beyond a valid secret.",
+		DocLLM:      "One row from GET /api/health: grafana_version (e.g. '12.1.1'), commit and database ('ok' when the backing database answers). Needs no permission beyond a valid secret.",
 		DocMD:       "## health\n\nServer version and database health.",
 		Examples: []vgi.CatalogExample{
-			{SQL: "SELECT version, database FROM grafana.main.health", Description: "Which Grafana version is running, and is its database up"},
+			{SQL: "SELECT grafana_version, database FROM grafana.main.health", Description: "Which Grafana version is running, and is its database up"},
 		},
 	},
 	Cols: []col{
-		cStr("version", "Grafana version.", "version"),
+		cStr("grafana_version", "Grafana version, e.g. '12.1.1'.", "version"),
 		cStr("commit", "Build commit.", "commit"),
 		cStr("database", "'ok' when the backing database answers.", "database"),
 		cBool("enterprise_commit_present", "Built with Grafana Enterprise code.", "_enterprise"),

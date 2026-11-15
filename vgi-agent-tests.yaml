@@ -1,16 +1,88 @@
 # Private graders for the public vgi.agent_test_tasks in the worker's catalog metadata.
 # `vgi-lint lint --ai` runs an agent on each prompt and grades it with check_sql.
 # See https://github.com/Query-farm/vgi-lint-check (VGI920).
+#
+# Every task reads a Grafana server and assumes a `grafana` secret whose BASE_URL
+# is the replay fixture (python3 test/fixture_server/server.py, PAGE_SIZE '2') or
+# the live fixture (test/fixture/run-grafana.sh); CI cannot run them (execute: false).
 tasks:
-  - name: formal_greeting
-    reference_sql: SELECT grafana.main.greet('Grace', 'formal') AS greeting
-  - name: sum_of_squares
-    reference_sql: SELECT sum(squared) AS total FROM grafana.main.sequence_table(10)
-  - name: stepped_sequence
-    reference_sql: SELECT n FROM grafana.main.sequence_table(4, step := 5) ORDER BY n
-  # Reads the public demo API (https://vgi-starter-api.query-farm.services/v1).
-  - name: items_per_category
+  - name: dashboards_per_folder
+    reference_sql: >-
+      SELECT folder_path, count(*) AS dashboards FROM grafana.main.dashboards GROUP BY folder_path ORDER BY folder_path
+  - name: starred_dashboards
+    reference_sql: SELECT title FROM grafana.main.dashboards WHERE is_starred ORDER BY title
+  - name: nested_folders
+    reference_sql: SELECT title, folder_path FROM grafana.main.folders ORDER BY depth DESC, folder_path
+  - name: panel_types
+    reference_sql: >-
+      SELECT type, count(*) AS panels FROM grafana.main.panels WHERE type IS DISTINCT FROM 'row' AND type IS NOT NULL
+      GROUP BY type ORDER BY type
+  - name: promql_queries
+    reference_sql: >-
+      SELECT dashboard_title, expr FROM grafana.main.panel_queries
+      WHERE datasource_type = 'prometheus' AND expr IS NOT NULL ORDER BY dashboard_title, expr
+  - name: unused_datasources
     check_sql: >-
-      SELECT count(*) = 3 AND sum(items) = 25
-      FROM (SELECT category, count(*) AS items
-            FROM grafana.main.fetch_items('https://vgi-starter-api.query-farm.services/v1') GROUP BY category)
+      SELECT count(*) = 0 FROM grafana.main.connections c
+      ANTI JOIN grafana.main.panel_queries q ON q.datasource_uid = c.id
+  - name: dashboard_history
+    reference_sql: >-
+      SELECT version, created_by, message FROM grafana.main.dashboard_versions
+      WHERE dashboard_uid = 'web-overview' ORDER BY version
+  - name: library_usage
+    reference_sql: SELECT name, connected_dashboards FROM grafana.main.library_panels ORDER BY name
+  - name: org_roles
+    reference_sql: SELECT role, count(*) AS users FROM grafana.main.users GROUP BY role ORDER BY role
+  - name: team_membership
+    reference_sql: SELECT login FROM grafana.main.team_members WHERE team_name = 'SRE' ORDER BY login
+  - name: firing_rules
+    reference_sql: SELECT rule_name FROM grafana.main.alert_rule_states WHERE state = 'firing' ORDER BY rule_name
+  - name: rule_datasources
+    reference_sql: >-
+      SELECT DISTINCT datasource_uid FROM grafana.main.alert_rule_queries WHERE NOT is_expression ORDER BY datasource_uid
+  - name: routing_tree
+    reference_sql: SELECT path, receiver, matchers FROM grafana.main.notification_policies ORDER BY path
+  - name: contact_point_types
+    reference_sql: SELECT name, type FROM grafana.main.contact_points ORDER BY name
+  - name: active_silences
+    reference_sql: SELECT created_by, comment FROM grafana.main.silences WHERE state = 'active' ORDER BY created_by
+  - name: deploy_annotations
+    reference_sql: >-
+      SELECT time, text FROM grafana.main.annotations WHERE list_contains(tags, 'deploy')
+      AND time >= TIMESTAMPTZ '2026-01-01 00:00:00+00' AND time < TIMESTAMPTZ '2026-01-02 00:00:00+00' ORDER BY time
+  - name: testdata_query
+    reference_sql: >-
+      SELECT ts, value FROM grafana.main.ds_query('testdata',
+        '{"scenarioId": "csv_metric_values", "stringInput": "1,20,90"}',
+        TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-01 01:00:00+00') ORDER BY ts
+  - name: server_version
+    reference_sql: SELECT grafana_version FROM grafana.main.health
+  - name: rules_per_folder
+    reference_sql: >-
+      SELECT rule_group, count(*) AS rules, count(*) FILTER (WHERE is_paused) AS paused
+      FROM grafana.main.alert_rules GROUP BY rule_group ORDER BY rule_group
+  - name: rule_transitions
+    reference_sql: >-
+      SELECT time, previous_state, current_state FROM grafana.main.alert_state_transitions
+      WHERE rule_uid = 'rule-high-latency' ORDER BY time
+  - name: alert_instances
+    reference_sql: SELECT alertname, receivers FROM grafana.main.alerts WHERE state = 'active' ORDER BY alertname
+  - name: weekend_mute
+    reference_sql: SELECT name, weekdays FROM grafana.main.mute_timings ORDER BY name
+  - name: organizations
+    reference_sql: SELECT org_id, name FROM grafana.main.orgs ORDER BY org_id
+  - name: group_intervals
+    reference_sql: SELECT name, interval_seconds FROM grafana.main.rule_groups ORDER BY name
+  - name: search_web
+    reference_sql: SELECT kind, title FROM grafana.main.search(query := 'web') ORDER BY kind, title
+  - name: service_account_tokens
+    reference_sql: SELECT name, role, token_count FROM grafana.main.service_accounts ORDER BY name
+  - name: team_sizes
+    reference_sql: SELECT name, member_count FROM grafana.main.teams ORDER BY name
+  - name: refresh_seconds
+    reference_sql: >-
+      SELECT title, grafana.main.duration_seconds(refresh) AS seconds FROM grafana.main.dashboards
+      WHERE refresh IS NOT NULL ORDER BY title
+  - name: redacted_endpoints
+    reference_sql: >-
+      SELECT grafana.main.redact_url('https://bot:s3cret@hooks.example.com/services/T0?token=abc') AS url

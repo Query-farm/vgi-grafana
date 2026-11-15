@@ -16,6 +16,20 @@ fail_on = "warning"
 #   tooling-bug       the linter is wrong; report it upstream
 ignore = [
   # { code = "VGI146", kind = "domain-exemption", reason = "every entry point needs a key" },
+  { code = "VGI144", object = "grafana.main.health", kind = "domain-exemption", reason = "single-row server status table named after Grafana's /api/health endpoint; a plural name would misdescribe it" },
+  { code = "VGI807", object = "grafana.main.health", kind = "domain-exemption", reason = "always exactly one row: the server's health" },
+  { code = "VGI807", object = "grafana.main.contact_points", kind = "domain-exemption", reason = "Grafana's provisioning API returns integrations whose uid can be empty (the default receiver) and whose names repeat across integrations, so no column set is a key" },
+  { code = "VGI807", object = "grafana.main.alert_state_transitions", kind = "domain-exemption", reason = "several alert instances of one rule can change state at the same instant with identical columns; Grafana assigns no transition id" },
+  { code = "VGI808", object = "grafana.main.annotations", kind = "tooling-bug", reason = "annotation_id is this table's own primary key; the rule compares the singular base 'annotation' with the plural table name. panel_id is unique only within a dashboard, so panels has no key to reference" },
+  { code = "VGI808", object = "grafana.main.orgs", kind = "tooling-bug", reason = "org_id is this table's own primary key; the rule compares the singular base 'org' with the plural table name" },
+  { code = "VGI808", object = "grafana.main.users", kind = "tooling-bug", reason = "user_id is this table's own primary key; the rule compares the singular base 'user' with the plural table name" },
+  { code = "VGI808", object = "grafana.main.teams", kind = "tooling-bug", reason = "team_id is this table's own primary key; the rule compares the singular base 'team' with the plural table name" },
+  { code = "VGI808", object = "grafana.main.service_accounts", kind = "tooling-bug", reason = "service_account_id is this table's own primary key; the rule compares the singular base with the plural table name" },
+  { code = "VGI808", object = "grafana.main.panels", kind = "domain-exemption", reason = "panel_id is unique only within a dashboard and Grafana does not enforce it, so panels declares no key for it to reference" },
+  { code = "VGI808", object = "grafana.main.panel_queries", kind = "domain-exemption", reason = "panel_id is unique only within a dashboard and Grafana does not enforce it, so panels declares no key for it to reference" },
+  { code = "VGI807", object = "grafana.main.panels", kind = "domain-exemption", reason = "panel ids are not enforced unique by Grafana (hand-edited or imported JSON can repeat them), and DuckDB treats a declared key as a guarantee" },
+  { code = "VGI807", object = "grafana.main.panel_queries", kind = "domain-exemption", reason = "panel ids and refIds are not enforced unique by Grafana, and DuckDB treats a declared key as a guarantee" },
+  { code = "VGI809", kind = "domain-exemption", reason = "ref_id is the per-panel / per-rule query letter (A, B, ...) in both panel_queries and alert_rule_queries, not a shared key" },
 ]
 
 # Adopting the gate on a worker that already has findings? Record them once with

@@ -131,7 +131,7 @@ func dashCols() []col {
 	return []col{
 		cTool(),
 		cKey("dashboard_uid", "UID of the dashboard holding the panel (joins dashboards.id).", "_dash", "dashboard", "uid"),
-		cStr("dashboard_title", "Dashboard title.", "_dash", "dashboard", "title"),
+		cStr("dashboard_title", "Title of the dashboard holding the panel.", "_dash", "dashboard", "title"),
 		cStr("folder_uid", "UID of the dashboard's folder; NULL in General.", "_dash", "meta", "folderUid"),
 		cFolderPath("Folder chain of the dashboard, e.g. '/Operations/Web'.", "_dash", "meta", "folderUid"),
 	}
@@ -145,6 +145,7 @@ var panelsDef = &tableDef{
 	Name:    "panels",
 	Catalog: true,
 	Folders: true,
+	FKs:     []foreignKey{{Cols: []string{"dashboard_uid"}, Table: "dashboards"}},
 	Docs: fnDocs{
 		Title:    "Dashboard Panels",
 		Category: "content",
@@ -165,11 +166,11 @@ var panelsDef = &tableDef{
 		},
 	},
 	Cols: append(dashCols(),
-		cInt("panel_id", "Panel id (unique within the dashboard).", "p", "id"),
+		cIntKey("panel_id", "Numeric panel identifier (unique within its dashboard).", "p", "id"),
 		cStr("title", "Panel title.", "p", "title"),
 		cStr("type", "Visualization plugin id, e.g. 'timeseries', 'stat', 'table', 'row'; NULL for a library panel instance.", "p", "type"),
 		cStr("description", "Panel description.", "p", "description"),
-		cInt("row_id", "Panel id of the collapsed row that contains this panel; NULL otherwise.", "row_id"),
+		cInt("row_id", "Numeric panel identifier (panel_id) of the collapsed row that contains this panel; NULL otherwise.", "row_id"),
 		cStr("row_title", "Title of the collapsed row that contains this panel.", "row_title"),
 		cFn("datasource_uid", tString, "UID of the panel's data source ('-- Mixed --' for mixed; a legacy name for old dashboards).", func(r rec, _ *scan) any {
 			u, _ := datasourceRef(path(r, "p", "datasource"))
@@ -181,10 +182,10 @@ var panelsDef = &tableDef{
 		}),
 		cStr("library_panel_uid", "UID of the library panel this instance shows (joins library_panels.uid).", "p", "libraryPanel", "uid"),
 		cStr("library_panel_name", "Name of the library panel.", "p", "libraryPanel", "name"),
-		cInt("grid_x", "Grid column (0-23).", "p", "gridPos", "x"),
-		cInt("grid_y", "Grid row.", "p", "gridPos", "y"),
-		cInt("grid_w", "Width in grid columns.", "p", "gridPos", "w"),
-		cInt("grid_h", "Height in grid rows.", "p", "gridPos", "h"),
+		cInt("grid_x", "Left offset in grid columns (0-23, 24 columns wide).", "p", "gridPos", "x"),
+		cInt("grid_y", "Top offset in grid rows from the top of the dashboard.", "p", "gridPos", "y"),
+		cInt("grid_w", "Width in grid columns (out of 24).", "p", "gridPos", "w"),
+		cInt("grid_h", "Height in grid rows (about 30 px each).", "p", "gridPos", "h"),
 		cFn("target_count", tInt64, "Number of queries (targets).", func(r rec, _ *scan) any {
 			t, _ := path(r, "p", "targets").([]any)
 			return int64(len(t))
@@ -230,8 +231,9 @@ var panelQueriesDef = &tableDef{
 	Name:    "panel_queries",
 	Catalog: true,
 	Folders: true,
+	FKs:     []foreignKey{{Cols: []string{"dashboard_uid"}, Table: "dashboards"}},
 	Docs: fnDocs{
-		Title:    "Panel Queries",
+		Title:    "Queries Behind Dashboard Panels",
 		Category: "content",
 		Keywords: "queries, targets, promql, sql, expr, rawSql, lineage, datasource usage, metrics used",
 		Description: "Every query (target) of every panel, with its effective data source and the query text " +
@@ -250,10 +252,10 @@ var panelQueriesDef = &tableDef{
 		},
 	},
 	Cols: append(dashCols(),
-		cInt("panel_id", "Panel id.", "p", "id"),
-		cStr("panel_title", "Panel title.", "p", "title"),
-		cStr("panel_type", "Visualization plugin id.", "p", "type"),
-		cStr("ref_id", "Query reference id (A, B, ...).", "t", "refId"),
+		cIntKey("panel_id", "Numeric identifier of the panel within its dashboard (joins panels.panel_id).", "p", "id"),
+		cStr("panel_title", "Title of the panel the query belongs to.", "p", "title"),
+		cStr("panel_type", "Visualization plugin id of the panel.", "p", "type"),
+		cKey("ref_id", "Query reference letter within the panel (A, B, ...).", "t", "refId"),
 		cFn("datasource_uid", tString, "Effective data source UID: the target's own, else the panel's.", func(r rec, _ *scan) any {
 			if u, _ := datasourceRef(path(r, "t", "datasource")); u != nil {
 				return u
@@ -307,8 +309,10 @@ var panelQueriesDef = &tableDef{
 var dashboardVersionsDef = &tableDef{
 	Name:    "dashboard_versions",
 	Catalog: true,
+	Key:     []string{"dashboard_uid", "version"},
+	FKs:     []foreignKey{{Cols: []string{"dashboard_uid"}, Table: "dashboards"}},
 	Docs: fnDocs{
-		Title:       "Dashboard Versions",
+		Title:       "Dashboard Save History",
 		Category:    "content",
 		Keywords:    "versions, history, audit, changes, who changed, save message",
 		Description: "The saved version history of every dashboard: version number, author, time and save message",
@@ -327,14 +331,13 @@ var dashboardVersionsDef = &tableDef{
 	Cols: []col{
 		cTool(),
 		cKey("dashboard_uid", "Dashboard UID (joins dashboards.id).", "uid"),
-		cInt("version", "Version number.", "version"),
-		cInt("parent_version", "The version this one was saved over.", "parentVersion"),
+		cIntKey("version", "Version number (1 for the first save, +1 per save).", "version"),
+		cInt("parent_version", "Version number this one was saved over (0 for the first save).", "parentVersion"),
 		cInt("restored_from", "Version this one restored (0 when not a restore).", "restoredFrom"),
 		cTS("created_at", "When the version was saved.", "created"),
 		cStr("created_by", "Login of the user who saved it.", "createdBy"),
 		cStr("message", "Save message.", "message"),
-		cInt("version_id", "Numeric version record id.", "id"),
-		cInt("dashboard_id", "Numeric dashboard id.", "dashboardId"),
+		cInt("version_id", "Numeric identifier of the version record (instance-local).", "id"),
 	},
 	Next: func(ctx context.Context, s *scan) ([][]any, error) {
 		if s.St.Keys == nil && s.St.KeyIdx == 0 {
@@ -414,8 +417,9 @@ var libraryPanelsDef = &tableDef{
 	Name:    "library_panels",
 	Catalog: true,
 	Folders: true,
+	Key:     []string{"uid"},
 	Docs: fnDocs{
-		Title:       "Library Panels",
+		Title:       "Reusable Library Panels",
 		Category:    "content",
 		Keywords:    "library panels, reusable panels, shared panels, library elements",
 		Description: "Reusable library panels: name, type, folder, how many dashboards use them and their model",
@@ -435,11 +439,11 @@ var libraryPanelsDef = &tableDef{
 		cKey("uid", "Library panel UID.", "uid"),
 		cStr("name", "Library panel name.", "name"),
 		cStr("type", "Visualization plugin id.", "type"),
-		cStr("description", "Description.", "description"),
+		cStr("description", "What the library panel shows, as written by its author.", "description"),
 		cStr("folder_uid", "UID of the folder it is stored in; NULL in General.", "folderUid"),
 		cFolderPath("Folder chain, e.g. '/Operations'.", "folderUid"),
-		cInt("version", "Version number.", "version"),
-		cInt("connected_dashboards", "Number of dashboards that embed it.", "meta", "connectedDashboards"),
+		cInt("version", "Version number (1 for the first save, +1 per save).", "version"),
+		cInt("connected_dashboards", "Count of dashboards that embed it.", "meta", "connectedDashboards"),
 		cTS("created_at", "Creation time.", "meta", "created"),
 		cTS("updated_at", "Last update time.", "meta", "updated"),
 		cStr("created_by", "Name of the user who created it.", "meta", "createdBy", "name"),
